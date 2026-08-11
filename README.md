@@ -564,16 +564,17 @@ metric applies no window. The symbol listbox ticks/unticks symbols via the
 **Data source toggle** (`source` query param): the main page's "Data
 source" dropdown switches which table `market_3d` reads.
 
-- `source=connected` (default) — existing behavior: `price_history`,
-  x = `symbol`, y = `trade_date`, channels from `NUMERIC_COLUMNS`, symbol
-  listbox from `instruments` (`symbol_list("connected")`).
-- `source=sampled` — `sampled_market_data`: x = `ticker_id`, y = `date`,
+- `source=sampled` (default) — `sampled_market_data`: x = `date`, y = the
+  selectable channel (default `change_y_bin`), z = `ticker_id` (depth),
   channels from `SAMPLED_NUMERIC_COLUMNS` (market_cap, price, rsi_14,
-  change, …) with defaults Z = `change_y_bin`, Size = `volume`, Color = `change`;
+  change, …) with defaults Y = `change_y_bin`, Size = `volume`, Color = `change`;
   the Z dropdown additionally offers the computed binary channel
   `change_y_bin` (`SAMPLED_CHANNEL_COLUMNS`); the symbol listbox lists
   ticker_ids instead (`symbol_list("sampled")`), `symbols=4405` filters one
   ticker, and `days` windows off `MAX(date)` from the sampled table.
+- `source=connected` — existing behavior: `price_history`, x = `symbol`,
+  y = `trade_date`, channels from `NUMERIC_COLUMNS`, symbol listbox from
+  `instruments` (`symbol_list("connected")`).
 
 The channel dropdown options are rendered per source by `app_flask.py`
 (`_channel_options`), and the rendered-chart cache key includes `source`
@@ -596,7 +597,7 @@ it via `logic_layer.handle_request` — no app file changes.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /` | main page HTML (3D chart rendered server-side); query params `days`, `symbols`, `z/size/color`, `source` (`connected` default \| `sampled`), and `threshold` (binary Z channel, default 0, clamped 0–100) |
+| `GET /` | main page HTML (3D chart rendered server-side); query params `days`, `symbols`, `z/size/color`, `source` (`sampled` default \| `connected`), and `threshold` (binary Z channel, default 0, clamped 0–100) |
 | `GET /api/config` | main/Streamlit URLs (used by the main page nav link) |
 
 ---
@@ -647,12 +648,13 @@ rejected symbols (`ADTX, CUBT, CYDX, DTII, NICH, NUWE, NXPL, PADEF, PBNNF,
 PPCB, PTPIF, SIGO, TOPS`) with no duplicates — and must not grow on a
 repeat load (dedupe check).
 
-Then open http://127.0.0.1:5000 — confirm the 3D market chart renders and
-the time-range select works. Switch the **Data source** dropdown to
-"Sampled dataset" — the chart should now use ticker_id / date with the
-sampled channel defaults; select **change_y_bin** in the Z dropdown — the
-threshold slider appears, the chart plots the 0/1 flag on Z, and the
-summary line shows the above-threshold count. Switch to the dashboard (nav
+Then open http://127.0.0.1:5000 — the page loads in **sampled** mode by
+default and the 3D market chart renders in front view (camera perpendicular
+to the x/y plane: date × change_y_bin × ticker_id); confirm the time-range
+select works. Switch the **Data source** dropdown to "Connected MySQL" and
+back — the chart should use the sampled channel defaults with the 0/1 flag
+on the vertical axis, the threshold slider visible, and the summary line
+showing the above-threshold count. Switch to the dashboard (nav
 link) and confirm the same data renders there with a working "Return to
 Main Page" button.
 # AIPE04_midterm

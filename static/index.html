@@ -90,7 +90,8 @@
     // data-source select -> reload, preserving other params.
     const sourceSel = document.getElementById("source-select");
     const src = urlParams().get("source");
-    if (src === "sampled") sourceSel.value = "sampled";
+    if (src === "connected") sourceSel.value = "connected";
+    else sourceSel.value = "sampled";
     sourceSel.addEventListener("change", () => {
       const p = urlParams();
       p.set("source", sourceSel.value);

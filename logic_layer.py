@@ -47,8 +47,9 @@ DEFAULT_CHANNELS = {"z": "close", "size": "volume", "color": "adj_close"}
 BINARY_CHANNEL = "change_y_bin"
 
 # Sampled-dataset mode (:5000 toggle `source=sampled`): the snapshot table
-# sampled_market_data has its own metric columns; x = ticker_id, y = date.
-# Z defaults to the binary channel (change_y_bin).
+# sampled_market_data has its own metric columns; x = date, z = ticker_id.
+# The Y axis carries the selectable channel and defaults to the binary
+# channel (change_y_bin).
 SAMPLED_NUMERIC_COLUMNS = (
     "market_cap", "52w_low", "prev_close", "price", "volume", "52w_high",
     "perf_ytd", "perf_year", "sma200", "perf_half_y", "avg_volume",
@@ -258,7 +259,7 @@ def market_3d(params):
 
 
 def _market_3d_sampled(params, _pick):
-    """sampled_market_data variant of market_3d: x = ticker_id, y = date.
+    """sampled_market_data variant of market_3d: x = date, z = ticker_id.
 
     Shares the absence-based `days` / `symbols` window semantics with the
     connected variant; `symbols` here are raw ticker_ids (strings matching
@@ -289,7 +290,7 @@ def _market_3d_sampled(params, _pick):
         tickers = [s.strip() for s in params["symbols"].split(",") if s.strip()]
     if tickers == []:
         return (
-            pd.DataFrame(), "market_3d", "scatter3d", "ticker_id", "date", "no symbols",
+            pd.DataFrame(), "market_3d", "scatter3d", "date", "ticker_id", "no symbols",
             {"meta": {"message": "No symbols selected."}},
         )
 
@@ -355,22 +356,22 @@ def _market_3d_sampled(params, _pick):
         else:
             message = "No data in sampled_market_data yet. Run: venv/bin/python load_sampled.py"
         return (
-            pd.DataFrame(), "market_3d", "scatter3d", "ticker_id", "date", window_label,
+            pd.DataFrame(), "market_3d", "scatter3d", "date", "ticker_id", window_label,
             {"meta": {"message": message}},
         )
 
     chart = {
         "type": "scatter3d",
-        "x": "ticker_id",          # sampled identity -> scatter x axis
-        "y": "date",               # snapshot date -> scatter y axis
-        "z": z,
+        "x": "date",             # snapshot date -> scatter x axis (time)
+        "y": z,                  # selectable channel -> scatter y axis
+        "z": "ticker_id",        # sampled identity -> scatter z axis (depth)
         "size": size,
         "hover": "ticker_id",
         "color": color,
         "colorscale": "RdYlGn",
         "colorbar_title": f"{color}",
         "opacity": 0.6,
-        "scene": {"x": "Ticker ID", "y": "Date", "z": z},
+        "scene": {"x": "Date", "y": z, "z": "Ticker ID"},
     }
     df["ticker_id"] = df["ticker_id"].astype(str)
     df["date"] = df["date"].astype(str)
@@ -382,7 +383,7 @@ def _market_3d_sampled(params, _pick):
                           "total": len(df)}
     df = _decimate(df, max_points)
 
-    return df, "market_3d", "scatter3d", "ticker_id", "date", window_label, extras
+    return df, "market_3d", "scatter3d", "date", "ticker_id", window_label, extras
 
 
 @register

@@ -101,9 +101,9 @@ def _request_view():
         symbols = [s.strip().upper() for s in raw_symbols.split(",") if s.strip()]
         symbols_explicit = True
 
-    source = (request.args.get("source") or "connected").strip()
+    source = (request.args.get("source") or "sampled").strip()
     if source not in logic_layer.SOURCES:
-        source = "connected"
+        source = "sampled"
 
     try:
         threshold = int((request.args.get("threshold") or "0").strip())
@@ -192,8 +192,9 @@ def _chart_html(days, symbols, channels, source, threshold):
                 xaxis_title=scene.get("x", "Symbol"),
                 yaxis_title=scene.get("y", "Trade Date"),
                 zaxis_title=scene.get("z", "Close ($)"),
+                camera=dict(eye=dict(x=0, y=0, z=2.5), up=dict(x=0, y=1, z=0)),
             ),
-            margin=dict(l=0, r=0, t=60, b=0),
+            margin=dict(l=0, r=0, t=0, b=0),
         )
         html = fig.to_html(full_html=False, include_plotlyjs=False,
                            config={"displayModeBar": False})

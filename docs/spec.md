@@ -342,12 +342,12 @@ Rules:
 | slug | used by | returns |
 |---|---|---|
 | `history` | Streamlit dashboard | raw OHLCV rows, chronological order oldest-first (line/candlestick); optional `days` trailing window; `limit` (default 250, `0` = no limit) |
-| `market_3d` | Flask main page (internal, not user-selectable) | decimated window of OHLCV columns + `chart` metadata mapping columns to the 3D scene; `x=symbol`, `y=trade_date` are **fixed** channels, `z/size/color` params override which numeric MySQL column drives each remaining channel (defaults: close/volume/adj_close, validated with fallback to defaults). **`source` param** (see below) switches the table and channels; `source=sampled` with `z=change_y_bin` is the **binary view** — a 0/1 flag computed at query time from `threshold` (≥ 0, default 0, negative/unparseable → 0) via `CASE WHEN b.change_y > %s THEN 1 ELSE 0 END` against `change_y_binary` (joined on the shared `(ticker_id, date)` PK), with `meta` counts (`above`/`total`) for the page summary |
-| `change_y_binary` | standalone (retained for direct calls) | sampled `change_y` → 0/1 flag at query time: `threshold` (int ≥ 0, default 0, negative/unparseable → 0); `change_y > threshold` → 1 else 0; optional `symbols` (ticker_ids), `days` window, `limit`; `chart` = `scatter3d` (x = `ticker_id`, y = `date`, z = `change_y`, color = `change_y_bin`) + `meta` counts (`above`/`total`) — the main page shows the same view via `market_3d`'s `change_y_bin` Z channel |
+| `market_3d` | Flask main page (internal, not user-selectable) | decimated window of OHLCV columns + `chart` metadata mapping columns to the 3D scene; with `source=connected`: `x=symbol`, `y=trade_date` are **fixed** channels, `z/size/color` params override which numeric MySQL column drives each remaining channel (defaults: close/volume/adj_close, validated with fallback to defaults). **`source` param** (see below) switches the table and channels; with `source=sampled` (the page default) the scene maps `x=date` (time), `y` = the selectable channel (default `change_y_bin`), `z=ticker_id` (depth) — the **binary view**, a 0/1 flag computed at query time from `threshold` (≥ 0, default 0, negative/unparseable → 0) via `CASE WHEN b.change_y > %s THEN 1 ELSE 0 END` against `change_y_binary` (joined on the shared `(ticker_id, date)` PK), with `meta` counts (`above`/`total`) for the page summary |
+| `change_y_binary` | standalone (retained for direct calls) | sampled `change_y` → 0/1 flag at query time: `threshold` (int ≥ 0, default 0, negative/unparseable → 0); `change_y > threshold` → 1 else 0; optional `symbols` (ticker_ids), `days` window, `limit`; `chart` = `scatter3d` (x = `ticker_id`, y = `date`, z = `change_y`, color = `change_y_bin`) + `meta` counts (`above`/`total`) — the main page shows the same view via `market_3d`'s `change_y_bin` default Y-axis mapping |
 
-**`source` param (`market_3d` only):** `connected` (default) reads
-`price_history` as above. `source=sampled` reads `sampled_market_data`:
-`x=ticker_id`, `y=date`, hover = `ticker_id`; `z/size/color` validate
+**`source` param (`market_3d` only):** `sampled` (default) reads
+`sampled_market_data`: `x=date`, `y` = the selectable channel (default
+`change_y_bin`), `z=ticker_id`, hover = `ticker_id`; `z/size/color` validate
 against `SAMPLED_NUMERIC_COLUMNS` (`market_cap`, `52w_low`, `prev_close`,
 `price`, `volume`, `52w_high`, `perf_ytd`, `perf_year`, `sma200`,
 `perf_half_y`, `avg_volume`, `perf_quarter`, `sma50`, `perf_month`,
@@ -357,10 +357,14 @@ additionally offers the computed binary channel `change_y_bin`
 (`SAMPLED_CHANNEL_COLUMNS` = `SAMPLED_NUMERIC_COLUMNS` + `change_y_bin`) —
 selecting it joins `change_y_binary` on the shared `(ticker_id, date)` PK
 and returns `CASE WHEN b.change_y > %s THEN 1 ELSE 0 END AS change_y_bin`
-from the `threshold` param (§6.3), plus `meta` above/total counts**; the
+from the `threshold` param (§6.3), plus `meta` above/total counts** (in
+sampled mode the Z dropdown drives the scene's Y axis; the depth axis is
+always `ticker_id`); the
 `days` window offs from `MAX(date)` of the sampled table; `symbols`
 filters raw `ticker_id`s (matching `symbol_list("sampled")`, which returns
-distinct ticker_ids instead of instrument symbols).
+distinct ticker_ids instead of instrument symbols). `source=connected`
+reads `price_history` instead: `x=symbol`, `y=trade_date`, z/size/color
+defaults close/volume/adj_close, symbol listbox from `instruments`.
 
 **Window semantics — "absence-based" `days`** (both metrics): an absent,
 non-positive or unparseable `days` means **no trailing window** (full
@@ -387,8 +391,8 @@ All math is plain SQL (window functions) + simple Python formatting. pandas is u
 
 ### 7.1 Flask — MAIN page (`app_flask.py`)
 
-- `GET /` — serves `static/index.html` with the 3D scatter figure injected server-side from the `market_3d` envelope (`app_flask._chart_html` → `logic_layer.handle_request`), rendered without the Plotly modebar toolbar (`config={"displayModeBar": False}`). TTL-cached per `(source, days, symbols, z, size, color, threshold)`.
-- **Binary view on the main page:** with `source=sampled`, the Z dropdown renders the computed `change_y_bin` option (`SAMPLED_CHANNEL_COLUMNS`); while it is selected a threshold slider (`<input type="range">`, 0–100, step 1) appears in the topbar and reloads `/?threshold=N` (clamped server-side to `0..BINARY_MAX_THRESHOLD`); the page also renders a one-line summary below the 3D chart from the `market_3d` envelope's `above`/`total` meta counts. There is no separate `/binary` page anymore.
+- `GET /` — serves `static/index.html` with the 3D scatter figure injected server-side from the `market_3d` envelope (`app_flask._chart_html` → `logic_layer.handle_request`), rendered without the Plotly modebar toolbar (`config={"displayModeBar": False}`) and with a front-view camera on load (`scene.camera` eye on the depth axis — perpendicular to the x/y plane; users can still rotate). The page defaults to `source=sampled` (no `?source=` param). TTL-cached per `(source, days, symbols, z, size, color, threshold)`.
+- **Binary view on the main page:** with `source=sampled` (the default), the Z dropdown renders the computed `change_y_bin` option (`SAMPLED_CHANNEL_COLUMNS`) and drives the scene's Y axis (x = date, z = ticker_id); while it is selected a threshold slider (`<input type="range">`, 0–100, step 1) appears in the topbar and reloads `/?threshold=N` (clamped server-side to `0..BINARY_MAX_THRESHOLD`); the page also renders a one-line summary below the 3D chart from the `market_3d` envelope's `above`/`total` meta counts. There is no separate `/binary` page anymore.
 - Main page topbar has a time-range dropdown (Last 30 days default / 60 / 90 / 180 / 365 / **All history**), a multi-select symbol listbox (default: first symbol ticked; `symbols=` = none ticked, `symbols=A,B` = those only; options injected at `<!-- SYMBOLS -->` from `logic_layer.symbol_list()`), and Z/Size/Color dropdowns (numeric-only, validated with fallback). Each change reloads `/?days=…&symbols=…&z=…&size=…&color=…`; `days=` (empty) means all history. `GET /api/config` is also served; the nav bar uses it for the **hyperlink** to the Streamlit secondary page (`FTE_STREAMLIT_URL`).
 
 ### 7.2 Streamlit — secondary page (`app_streamlit.py`)

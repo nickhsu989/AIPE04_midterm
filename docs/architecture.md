@@ -140,6 +140,112 @@ Pipelines A and B upsert into `instruments` + `price_history` and write one
 `ingest_log` row per run, all via `db.py` (Pipeline C also writes one
 `ingest_log` row per run but targets only `sampled_market_data`).
 
+## MySQL schema — entity-relationship diagram
+
+Six tables. Exactly one declared foreign key (`price_history.symbol →
+instruments.symbol`); the other three cross-table relationships are
+**logical same-key-shape joins** (enforced in SQL by loaders/queries, not by
+DB constraints).
+
+```mermaid
+erDiagram
+    INSTRUMENTS ||--o{ PRICE_HISTORY : "FK fk_px_symbol · ON DELETE CASCADE"
+    INSTRUMENTS ||--o{ SAMPLED_MARKET_DATA : "symbol (logical — nullable, currently NULL)"
+    SAMPLED_MARKET_DATA ||--o| CHANGE_Y_BINARY : "(ticker_id, date) same key shape"
+    PRICE_HISTORY ||--o| CLOSE_OPEN_RATIO_CHGPCT : "(symbol, trade_date) same key shape"
+
+    INSTRUMENTS {
+        varchar(16) symbol PK
+        varchar(255) name
+        enum asset_type
+        char(3) currency
+        varchar(64) sector
+        datetime last_sync
+    }
+
+    PRICE_HISTORY {
+        varchar(16) symbol PK,FK
+        date trade_date PK
+        decimal open "decimal(18,6)"
+        decimal high "decimal(18,6)"
+        decimal low "decimal(18,6)"
+        decimal close "decimal(18,6)"
+        decimal adj_close "decimal(18,6)"
+        bigint volume
+    }
+
+    SAMPLED_MARKET_DATA {
+        int ticker_id PK
+        date date PK
+        varchar(16) symbol
+        decimal market_cap "decimal(20,6)"
+        bigint _52w_low "52w_low · decimal(18,6)"
+        decimal prev_close "decimal(18,6)"
+        decimal price "decimal(18,6)"
+        bigint volume
+        bigint _52w_high "52w_high · decimal(18,6)"
+        decimal perf_ytd "decimal(18,6)"
+        decimal perf_year "decimal(18,6)"
+        decimal sma200 "decimal(18,6)"
+        decimal perf_half_y "decimal(18,6)"
+        bigint avg_volume
+        decimal perf_quarter "decimal(18,6)"
+        decimal sma50 "decimal(18,6)"
+        decimal perf_month "decimal(18,6)"
+        decimal sma20 "decimal(18,6)"
+        decimal atr "decimal(18,6)"
+        decimal rsi_14 "decimal(18,6)"
+        decimal perf_week "decimal(18,6)"
+        decimal rel_volume "decimal(18,6)"
+        decimal change "decimal(18,6)"
+        decimal change_y "decimal(18,6)"
+    }
+
+    CHANGE_Y_BINARY {
+        int ticker_id PK
+        date date PK
+        varchar(16) symbol
+        decimal change_y "decimal(18,6)"
+    }
+
+    CLOSE_OPEN_RATIO_CHGPCT {
+        varchar(16) symbol PK
+        date trade_date PK
+        decimal close_open_ratio "decimal(18,6)"
+    }
+
+    INGEST_LOG {
+        int id PK
+        enum source
+        varchar(16) symbol
+        varchar(500) detail
+        int rows_written
+        enum status
+        datetime started_at
+        datetime finished_at
+    }
+```
+
+**Declared constraints vs. logical joins:**
+
+- **Declared FK (the only one):** `price_history.symbol` → `instruments.symbol`
+  (`fk_px_symbol`, `ON DELETE CASCADE`).
+- **Logical same-key-shape joins** (enforced in SQL, not by constraints):
+  - `change_y_binary` mirrors `sampled_market_data` on `(ticker_id, date)` —
+    joined at query time by the `market_3d` metric (`LEFT JOIN change_y_binary`).
+  - `close_open_ratio_chgpct` mirrors `price_history` on `(symbol, trade_date)` —
+    primary-key `JOIN` used by `load_close_open_ratio.py` / queries.
+  - `sampled_market_data.symbol` is nullable and currently NULL — ready for a
+    later `JOIN` against `instruments`.
+- **`ingest_log`** — standalone audit table (auto-increment `id`); every
+  loader writes one row per run; no foreign keys.
+- Attribute names rendered with a leading underscore (`_52w_low`,
+  `_52w_high`) are display aliases for the digit-leading DB columns
+  `52w_low` / `52w_high` — mermaid v11 cannot render attribute names that
+  start with a digit; the real column name is shown in the attribute
+  comment.
+- Full DDL for all six tables: `docs/spec.md` Appendix A.
+
 Notes:
 - `verify_tickers.py` and `app_presenter.py` are standalone — no imports from other project files.
 - UIs (Flask/Streamlit) are presentation-only; all SQL lives behind `logic_layer.py` / `db.py`.
