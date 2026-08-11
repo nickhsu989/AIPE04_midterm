@@ -24,7 +24,7 @@ URL semantics:
     symbols=A,B        -> only those symbols
     threshold=N        -> binary threshold (only used when z=change_y_bin)
 
-Run: flask --app app_flask run
+Run: source venv/bin/activate && python app_flask.py   # binds FTE_BIND_HOST from .env
 """
 import os
 import time
@@ -178,7 +178,6 @@ def _chart_html(days, symbols, channels, source, threshold):
             z=chart["z"],
             size=chart.get("size"),
             hover_name=chart.get("hover"),
-            title=chart.get("title", "Technical Market Structure & Momentum"),
             opacity=chart.get("opacity", 0.6),
         )
         # Continuous color mapped here (not via px) — px's color= path is ~100x
@@ -196,7 +195,8 @@ def _chart_html(days, symbols, channels, source, threshold):
             ),
             margin=dict(l=0, r=0, t=60, b=0),
         )
-        html = fig.to_html(full_html=False, include_plotlyjs=False)
+        html = fig.to_html(full_html=False, include_plotlyjs=False,
+                           config={"displayModeBar": False})
 
     _cache["key"], _cache["html"], _cache["meta"], _cache["ts"] = key, html, meta, now
     return html, meta

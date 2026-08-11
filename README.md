@@ -54,12 +54,13 @@ rejected symbols are unique, rest are dev-phase probes) · `sampled_market_data`
 
 ## 1. Overview
 
-The platform ingests market data (equity + indices) from yfinance and CSV
-uploads, stores it in MySQL, computes analytics in a single replaceable
+The platform ingests market data (equity + indices) from yfinance, stores
+it in MySQL, computes analytics in a single replaceable
 **Logic Layer** (`logic_layer.py`), and presents it through two UIs:
 
 - **Main page** — Flask, server-rendered 3D market chart
-  (http://127.0.0.1:5000); all query/filter/column-mapping logic lives in
+  (http://127.0.0.1:5000) without the Plotly modebar toolbar; all
+  query/filter/column-mapping logic lives in
   the `market_3d` metric in `logic_layer.py`; a **Data source** toggle in
   the topbar switches between the connected MySQL tables
   (`price_history`, `source=connected`) and the sampled snapshot dataset
@@ -69,7 +70,7 @@ uploads, stores it in MySQL, computes analytics in a single replaceable
 - **Dashboard** — Streamlit secondary page, linked from the main page
   (http://127.0.0.1:8501), with a "Return to Main Page" button
 
-Data flow: `ingest_api.py` / `loader_csv.py` / `load_sampled.py` → MySQL
+Data flow: `ingest_api.py` / `load_sampled.py` → MySQL
 (`db.py`) → `logic_layer.py` (`history` + `market_3d` metrics) → Flask /
 Streamlit → browser.
 
@@ -93,7 +94,6 @@ midtermproject2/
 ├── load_sampled.py       # self-contained: creates sampled_market_data + upserts data/sampled_184408.csv
 ├── load_change_y_binary.py # self-contained: creates change_y_binary (PK ticker_id+date) from the same CSV
 ├── load_close_open_ratio.py # self-contained: creates close_open_ratio_chgpct (PK symbol+trade_date, close/open) from data/staging2/
-├── loader_csv.py         # watches data/uploads/ for new CSVs → MySQL
 ├── logic_layer.py        # THE logic layer: metric registry + envelopes
 ├── app_presenter.py      # envelope → Plotly figure (shared)
 ├── app_flask.py          # Flask main app (server-rendered page + /api/config)
@@ -108,9 +108,6 @@ midtermproject2/
     ├── sampled_184408.csv # sampled snapshot dataset (loaded by load_sampled.py)
     ├── staging/          # API ingestion staging CSVs
     ├── staging2/         # full-history export checkpoints (<SYM>_max.csv)
-    ├── uploads/          # drop CSVs here for loader_csv.py
-    ├── processed/        # successfully loaded CSVs
-    └── rejected/         # failed CSVs (moved here)
 ```
 
 ---
@@ -219,11 +216,14 @@ passwords).
 
 ## 7. Running the app
 
+> These are the canonical startup commands — the single source of truth.
+> Every other section (and `docs/spec.md`) refers back here.
+
 Terminal A — main page (Flask):
 
 ```bash
 source venv/bin/activate
-flask --app app_flask run
+python app_flask.py
 ```
 
 Expected:
@@ -238,6 +238,11 @@ Press CTRL+C to quit
 ```
 
 → open http://127.0.0.1:5000
+
+`python app_flask.py` binds `FTE_BIND_HOST` from `.env` (default
+`127.0.0.1`; set it to `0.0.0.0` for LAN access, see below). Use
+`flask --app app_flask run` only if you need Flask's default
+127.0.0.1-only binding.
 
 Terminal B — dashboard (Streamlit):
 
@@ -261,7 +266,7 @@ Expected:
 Both at once in one terminal:
 
 ```bash
-flask --app app_flask run & streamlit run app_streamlit.py &
+python app_flask.py & streamlit run app_streamlit.py &
 ```
 
 Stop with `Ctrl+C` (or `kill %1 %2`).
@@ -278,7 +283,8 @@ machine on the LAN (e.g., from the host of a VM):
    FTE_STREAMLIT_URL=http://<THIS-MACHINE-LAN-IP>:8501
    ```
 2. Start Flask with `python app_flask.py` (it binds `FTE_BIND_HOST`), and
-   Streamlit with `streamlit run app_streamlit.py --server.address 0.0.0.0`.
+   Streamlit with `streamlit run app_streamlit.py --server.address 0.0.0.0`
+   (per §7 commands).
 3. From the other machine open `http://<LAN-IP>:5000` and
    `http://<LAN-IP>:8501`. The nav links between the two pages use
    `FTE_MAIN_URL` / `FTE_STREAMLIT_URL`, so both directions work.
@@ -292,7 +298,7 @@ servers live next to the data:
 
 ```bash
 ssh student@192.168.21.161
-cd Desktop/midtermproject2
+cd Desktop/AIPE04_midterm
 source venv/bin/activate
 ```
 
@@ -308,7 +314,7 @@ close the SSH session and writes each log into `logs/`:
 
 ```bash
 nohup python app_flask.py > logs/flask.log 2>&1 &
-nohup streamlit run app_streamlit.py --server.address 0.0.0.0 > logs/streamlit.log 2>&1 &
+nohup streamlit run app_streamlit.py --server.address 0.0.0.0 --server.headless true > logs/streamlit.log 2>&1 &
 ```
 
 The launch itself prints nothing (each shell prints a job id like `[1] 3476`).
@@ -428,26 +434,6 @@ OK: A -> 6716 rows (data/staging2/A_max.csv)
 DONE ok=7240 err=0 rows=... of 7240
 ```
 
-**CSV upload:**
-
-1. Drop a `.csv` with headers like `symbol,date,open,high,low,close,volume`
-   into `data/uploads/`.
-2. Run the loader once, or keep it watching:
-
-```bash
-python loader_csv.py --once        # single sweep
-python loader_csv.py --poll 5      # watch forever, every 5s
-```
-
-Expected console output (one line per file):
-
-```
-PROCESSED: mydata.csv -> 253 rows
-REJECTED: test.csv -> missing required columns: ['open']
-```
-
-Good files move to `data/processed/`, bad ones to `data/rejected/`.
-
 **Sampled snapshot dataset:**
 
 `load_sampled.py` is self-contained: it creates the `sampled_market_data`
@@ -546,8 +532,8 @@ threshold -> 0`) is computed **at query time** by `market_3d` in SQL
 on the shared `(ticker_id, date)` key). A **threshold slider** (0–100,
 step 1, default 0) appears in the topbar only while `change_y_bin` is
 selected as Z; it sends `?threshold=N` (negative or unparseable values
-fall back to 0, clamped 0–100). The chart shows a one-line summary
-("N rows · M above threshold (p%)"). The `change_y_binary` metric in
+fall back to 0, clamped 0–100). Below the 3D chart, a one-line summary
+shows ("N rows · M above threshold (p%)"). The `change_y_binary` metric in
 `logic_layer.py` is retained as a standalone metric for direct calls.
 
 ---
@@ -624,9 +610,8 @@ it via `logic_layer.handle_request` — no app file changes.
 | Charts still using old code after an edit | Streamlit only hot-reloads the main script (`app_streamlit.py`); changes to imported modules (`logic_layer.py`, `app_presenter.py`, `db.py`) require restarting both servers |
 | `no data returned (invalid symbol or empty range)` | wrong/unlisted yfinance symbol → try `AAPL` or `^GSPC`; check with `period=5d` |
 | Charts empty on both pages | no data ingested → run `ingest_api.py --symbol AAPL --period 1y` first |
-| `HTTP 404` on port 8501 | Streamlit not running → `streamlit run app_streamlit.py` |
+| `HTTP 404` on port 8501 | Streamlit not running → restart it per §7 (`streamlit run app_streamlit.py`) |
 | `429` rate-limit from yfinance | transient — the pipeline retries once and logs; wait and re-run |
-| CSV stuck in `data/uploads/` | loader not running → `python loader_csv.py --poll 5`, or check `data/rejected/` for a parse error |
 | Dashboard "Return to Main Page" dead | `FTE_MAIN_URL` mismatch or Flask not running on 5000 |
 | App dies when I close the SSH session | background jobs need `nohup` (or run under `tmux`/`screen`) — see §7 "Start the app over SSH" |
 | Sampled mode shows `ProgrammingError 1064` | server running an old `logic_layer.py` (reserved/digit-leading columns like `change`, `52w_*` must be backtick-quoted) → restart Flask |
@@ -644,7 +629,6 @@ python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'d
 python -c "import logic_layer; print(logic_layer.symbol_list())"        # e.g. ['AAPL', 'MSFT', ...]
 curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?days=90&symbols=AAPL"
 python ingest_api.py --symbol AAPL --period 5d                          # OK: AAPL -> N rows (staging: data/staging/AAPL_5d.csv)
-python loader_csv.py --once                                             # PROCESSED: <file> -> N rows
 python load_staging2.py --max 5                                         # smoke load; failures auto-recorded to data/universe/verified_rejected.csv
 python load_sampled.py --max 5                                          # smoke load: first 5 rows -> sampled_market_data
 python load_change_y_binary.py --max 5                                 # smoke load: first 5 rows -> change_y_binary

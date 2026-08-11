@@ -27,7 +27,6 @@ flowchart TD
         lratio["load_close_open_ratio.py"]
         lsam["load_sampled.py"]
         lbin["load_change_y_binary.py"]
-        lc["loader_csv.py — watch-folder engine"]
     end
     subgraph CORE["Core (backend)"]
         direction LR
@@ -52,15 +51,6 @@ flowchart TD
         subgraph STAG2["staging2/"]
             s2["&lt;SYM&gt;_max.csv (~7,240 exports)"]
         end
-        subgraph UP["uploads/"]
-            up["*.csv"]
-        end
-        subgraph PROC["processed/"]
-            prc["*.csv"]
-        end
-        subgraph REJ["rejected/"]
-            rj["*.csv"]
-        end
     end
     yf["yfinance API"]
     mysql[("MySQL finance_app: instruments · price_history · ingest_log · sampled_market_data · change_y_binary · close_open_ratio_chgpct")]
@@ -69,7 +59,6 @@ flowchart TD
     yf --> api
     smp --> lsam
     smp --> lbin
-    up --> lc
     v --> vok
     v --> vbad
     vok --> u
@@ -79,14 +68,11 @@ flowchart TD
     l2 -.-> rej2
     u -.-> api
     api --> stg
-    lc --> prc
-    lc --> rj
     l2 --> db
     lratio --> db
     lsam --> db
     lbin --> db
     api --> db
-    lc --> db
     db --> mysql
     setup -.-> mysql
     db -.-> sch
@@ -95,7 +81,6 @@ flowchart TD
     fl --> ll
     sl --> ll
     sl --> pres
-    sl --> db
     fl -.-> idx
 ```
 
@@ -114,7 +99,6 @@ flowchart TD
 | Loaders | `load_close_open_ratio.py` | Computes `close/open` per row from `data/staging2/` CSVs into `close_open_ratio_chgpct` (PK `(symbol, trade_date)`, joins to `price_history` by primary key) |
 | Loaders | `load_sampled.py` | Self-contained loader: creates `sampled_market_data` + upserts `data/sampled_184408.csv` |
 | Loaders | `load_change_y_binary.py` | Self-contained loader: creates `change_y_binary` (PK `(ticker_id, date)`, mirrors `sampled_market_data`) from the same CSV |
-| Loaders | `loader_csv.py` | Bulk CSV upload engine (polls `data/uploads/` → `processed/` \| `rejected/`) |
 | Core | `logic_layer.py` | THE Logic Layer: metric registry, canonical envelopes (`history`, `market_3d`, `change_y_binary`) |
 | Core | `db.py` | Centralized MySQL access (backend only; UIs never touch MySQL directly) |
 | Core | `config.py` | Single source of truth for settings (`.env`) |
@@ -135,10 +119,9 @@ flowchart TD
   `price_history`; stores the per-row `close / open` ratio for a
   primary-key `JOIN` against `price_history`).
 
-**Pipeline B — on-demand / manual** (two independent feeds into MySQL):
+**Pipeline B — on-demand / manual** (single feed into MySQL):
 
 - `ingest_api.py` → `data/staging/<SYM>.csv` → MySQL (single symbol, e.g. `--symbol AAPL --period 1y`)
-- `loader_csv.py` ← `data/uploads/*.csv` → `data/processed/` (success) | `data/rejected/` (failure)
 
 **Pipeline C — sampled snapshot** (standalone tables, no foreign keys):
 
@@ -159,5 +142,4 @@ Pipelines A and B upsert into `instruments` + `price_history` and write one
 
 Notes:
 - `verify_tickers.py` and `app_presenter.py` are standalone — no imports from other project files.
-- `app_streamlit.py` is the only presentation file that imports `db.py` directly (symbol list for its selectbox).
 - UIs (Flask/Streamlit) are presentation-only; all SQL lives behind `logic_layer.py` / `db.py`.

@@ -8,7 +8,7 @@ Scope: full design of a data-driven financial analytics web app, per `docs/archi
 
 ## 1. System Overview
 
-The platform ingests external market data through a yfinance API pipeline and a bulk CSV upload engine, stores it in a relational MySQL database, processes it through an isolated, replaceable **Logic Layer**, and serves the results through two self-contained presentation surfaces: a **Flask** main page (custom HTML/CSS/JS frontend) and a **Streamlit** secondary dashboard.
+The platform ingests external market data through a yfinance API pipeline, stores it in a relational MySQL database, processes it through an isolated, replaceable **Logic Layer**, and serves the results through two self-contained presentation surfaces: a **Flask** main page (custom HTML/CSS/JS frontend) and a **Streamlit** secondary dashboard.
 
 ### 1.1 Goals
 
@@ -20,18 +20,18 @@ The platform ingests external market data through a yfinance API pipeline and a 
 ### 1.2 Data flow (end-to-end)
 
 ```
-                    yfinance API                     CSV uploads            sampled snapshot
-                        │                                │                  data/sampled_184408.csv
-                        ▼                                ▼                          │
-                ingest_api.py                    loader_csv.py                load_sampled.py
-              (requests/yfinance →     (polls data/uploads, maps columns  (self-contained: creates
-               pandas/numpy clean →      → transactional commits)         sampled_market_data +
-               staging CSV → insert)          │                           upserts snapshot rows)
-                        │                     │                                  │
-                        │                     │                     load_change_y_binary.py
-                        │                     │                     (creates change_y_binary,
-                        │                     │                      PK ticker_id+date, §5.5)
-                        ▼                     ▼                                  ▼
+                    yfinance API                     sampled snapshot
+                        │                           data/sampled_184408.csv
+                        ▼                                  │
+                ingest_api.py                        load_sampled.py
+              (requests/yfinance →          (self-contained: creates
+               pandas/numpy clean →         sampled_market_data +
+               staging CSV → insert)        upserts snapshot rows)
+                        │                                  │
+                        │                      load_change_y_binary.py
+                        │                      (creates change_y_binary,
+                        │                       PK ticker_id+date, §5.5)
+                        ▼                                  ▼
               ┌────────────────────────────────────────────────────────────────────┐
               │              Storage Tier (MySQL, db.py)                          │
               │  instruments · price_history · ingest_log · sampled_market_data   │
@@ -84,7 +84,7 @@ The platform ingests external market data through a yfinance API pipeline and a 
 midtermproject2/
 ├── .env                      # real secrets (gitignored) — user fills ONLY DB_USER / DB_PASSWORD
 ├── .env.example              # committed template with all non-secret defaults
-├── .gitignore                # .env, venv/, __pycache__/, data staging + processed files
+├── .gitignore                # .env, venv/, __pycache__/, data staging files
 ├── requirements.txt          # dependency list (§1.3)
 ├── setup_finance_app.sql     # one-time admin bootstrap: DB + user + grants + tables
 ├── schema.sql                # EMPTY placeholder — reserved for future MySQL DDL only
@@ -92,7 +92,6 @@ midtermproject2/
 ├── db.py                     # pymysql connection + execute_schema() + query/insert helpers
 ├── ingest_api.py             # yfinance → DataFrame → numpy cleaning → staging CSV → MySQL
 ├── ingest_universe.py        # bulk full-history export (CSV-only, resumable) → data/staging2/ (§5.4)
-├── loader_csv.py             # polls upload dir, maps CSV columns → MySQL, transactional
 ├── load_sampled.py           # creates sampled_market_data + upserts data/sampled_184408.csv (§5.3)
 ├── load_change_y_binary.py   # creates change_y_binary (PK ticker_id+date) from the same CSV (§5.5)
 ├── load_staging2.py          # loads data/staging2/ CSVs → MySQL; failures → verified_rejected.csv (§5.4)
@@ -112,9 +111,6 @@ midtermproject2/
     ├── universe/             # tickerinventory.csv, verify_ok.csv, verify_bad.csv, verified_rejected.csv (§5.4)
     ├── staging/              # ingest_api.py writes staged CSVs here
     ├── staging2/             # ingest_universe.py export checkpoints (<SYM>_max.csv) (§5.4)
-    ├── uploads/              # loader_csv.py watches this directory
-    ├── processed/            # loader_csv.py moves handled CSVs here
-    └── rejected/             # loader_csv.py moves invalid CSVs here
 ```
 
 ---
@@ -175,16 +171,6 @@ Process sequence (per the architecture description):
 8. Write one `ingest_log` row: source `api`, symbol, rows written, status, timestamps.
 
 Rate-limit handling: on yfinance failure, log and retry once with a short sleep; final failure → `ingest_log` row with status `error`.
-
-### 5.2 Bulk CSV upload — `loader_csv.py`
-
-1. Polls `FTE_UPLOAD_DIR` every N seconds (simple loop; no extra watchdog library).
-2. On a new `.csv` file: sniff headers from row 1, map delimited columns to MySQL fields (data dictionary in Appendix C).
-3. Validate types with pandas/numpy; skip/move malformed files to `FTE_REJECTED_DIR`.
-4. Open a transaction: upsert the distinct symbols into `instruments` **first** (FK parent-first, see §5.1), then `executemany` inserts into `price_history` (upsert), commit; on exception roll back and log.
-5. Move the file to `FTE_PROCESSED_DIR`; write `ingest_log` rows.
-
-Both paths write only to `instruments`, `price_history`, `ingest_log`. The Logic Layer never cares which ingestion produced the data.
 
 ### 5.3 Sampled snapshot loader — `load_sampled.py`
 
@@ -338,8 +324,7 @@ Metric functions are pure: `(params) -> DataFrame`. They query only via `db.quer
   "chart": {
     "type": "line",
     "x": "trade_date",
-    "y": "close",
-    "title": "history — AAPL"
+    "y": "close"
   },
   "columns": ["trade_date", "open", "high", "low", "close", "adj_close", "volume"],
   "rows": [["2026-07-31", 240.5, 242.0, 238.9, 241.5, 241.5, 50000000]]
@@ -402,15 +387,15 @@ All math is plain SQL (window functions) + simple Python formatting. pandas is u
 
 ### 7.1 Flask — MAIN page (`app_flask.py`)
 
-- `GET /` — serves `static/index.html` with the 3D scatter figure injected server-side from the `market_3d` envelope (`app_flask._chart_html` → `logic_layer.handle_request`). TTL-cached per `(source, days, symbols, z, size, color, threshold)`.
-- **Binary view on the main page:** with `source=sampled`, the Z dropdown renders the computed `change_y_bin` option (`SAMPLED_CHANNEL_COLUMNS`); while it is selected a threshold slider (`<input type="range">`, 0–100, step 1) appears in the topbar and reloads `/?threshold=N` (clamped server-side to `0..BINARY_MAX_THRESHOLD`); the page also renders a one-line summary from the `market_3d` envelope's `above`/`total` meta counts. There is no separate `/binary` page anymore.
+- `GET /` — serves `static/index.html` with the 3D scatter figure injected server-side from the `market_3d` envelope (`app_flask._chart_html` → `logic_layer.handle_request`), rendered without the Plotly modebar toolbar (`config={"displayModeBar": False}`). TTL-cached per `(source, days, symbols, z, size, color, threshold)`.
+- **Binary view on the main page:** with `source=sampled`, the Z dropdown renders the computed `change_y_bin` option (`SAMPLED_CHANNEL_COLUMNS`); while it is selected a threshold slider (`<input type="range">`, 0–100, step 1) appears in the topbar and reloads `/?threshold=N` (clamped server-side to `0..BINARY_MAX_THRESHOLD`); the page also renders a one-line summary below the 3D chart from the `market_3d` envelope's `above`/`total` meta counts. There is no separate `/binary` page anymore.
 - Main page topbar has a time-range dropdown (Last 30 days default / 60 / 90 / 180 / 365 / **All history**), a multi-select symbol listbox (default: first symbol ticked; `symbols=` = none ticked, `symbols=A,B` = those only; options injected at `<!-- SYMBOLS -->` from `logic_layer.symbol_list()`), and Z/Size/Color dropdowns (numeric-only, validated with fallback). Each change reloads `/?days=…&symbols=…&z=…&size=…&color=…`; `days=` (empty) means all history. `GET /api/config` is also served; the nav bar uses it for the **hyperlink** to the Streamlit secondary page (`FTE_STREAMLIT_URL`).
 
 ### 7.2 Streamlit — secondary page (`app_streamlit.py`)
 
 Deliberately barebones: a fixed price-history view, no metric menu.
 
-- Symbol dropdown populated live from `instruments` (`SELECT symbol FROM instruments ORDER BY symbol` via `db.py`) — only ingested symbols appear.
+- Symbol dropdown populated live from `instruments` via `logic_layer.symbol_list()` (`SELECT symbol FROM instruments ORDER BY symbol`) — only ingested symbols appear.
 - On load and on symbol change it auto-runs the `history` metric through `logic_layer.handle_request` (same envelope contract, no duplicated query logic) and renders the chart + data table via `app_presenter.envelope_to_figure`.
 - Window radio: **Last 30 days (default)** / 60 / 90 / 365 / All — windowed choices pass `days=N` with `limit=0` (full window), All omits `days` (full history); no row-count toggle.
 - Data table headers are mapped to friendly names (`Trade Date`, `Open`, `High`, `Low`, `Close`, `Adj Close`, `Volume`).
@@ -443,10 +428,12 @@ python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # then fill DB_USER / DB_PASSWORD
 python ingest_api.py --symbol AAPL --period 1y    # seed data
-python loader_csv.py &                            # optional upload watcher
-flask --app app_flask run                          # main page  :5000
-streamlit run app_streamlit.py                     # secondary :8501
+python app_flask.py                               # main page  :5000 (binds FTE_BIND_HOST)
+streamlit run app_streamlit.py                    # secondary :8501
 ```
+
+Canonical startup instructions live in **README §7** — the single source of
+truth for how to run the apps (including background/`nohup` and LAN forms).
 
 MySQL prerequisites (run once as admin, from the project root):
 `mysql -u root -p < setup_finance_app.sql` — creates the `finance_app`
@@ -472,7 +459,6 @@ database, the app user with grants, and all three tables. Then fill
 |---|---|
 | Ingestion API | `ingest_api.py --symbol AAPL --period 1w` → staging CSV created; `ingest_log` has an `ok` row; rows visible in MySQL |
 | Invalid symbol | e.g. `ZZZZ.AA` → skipped, logged as `error`, no crash |
-| CSV loader | Drop valid OHLCV CSV in `data/uploads` → moved to `processed/`, rows inserted; malformed → `rejected/` |
 | Logic layer | Call `history` and `market_3d` via `handle_request`; assert `chart.type` valid, `columns` == `rows` width, non-empty |
 | **Column-mapping test** | Edit only `market_3d`'s `chart` dict (e.g. `z: close → adj_close`) → main page 3D chart reflects it with no app-file changes |
 | Flask main | `GET /` → 200, 3D chart renders, time-range select reloads `?days=N` |

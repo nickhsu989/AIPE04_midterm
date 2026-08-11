@@ -7,7 +7,6 @@ days). Uses the SAME logic_layer registry as the Flask main app.
 import pandas as pd
 import streamlit as st
 
-import db
 import logic_layer
 from app_presenter import envelope_to_figure
 from config import CFG
@@ -30,7 +29,7 @@ st.title("Analytics Dashboard")
 
 st.link_button("Return to Main Page", CFG["FTE_MAIN_URL"])
 
-symbols = [r["symbol"] for r in db.query("SELECT symbol FROM instruments ORDER BY symbol")]
+symbols = logic_layer.symbol_list()
 if not symbols:
     st.warning("No data ingested yet. Run: python ingest_api.py --symbol AAPL --period 1y")
     st.stop()

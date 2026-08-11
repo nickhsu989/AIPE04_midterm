@@ -252,7 +252,6 @@ def market_3d(params):
         "colorscale": "RdYlGn",
         "colorbar_title": f"{color}",
         "opacity": 0.6,
-        "title": "Technical Market Structure & Momentum",
         "scene": {"x": "Symbol", "y": "Trade Date", "z": z},
     }
     return df, "market_3d", "scatter3d", "symbol", "trade_date", window_label, {"chart": chart}
@@ -371,7 +370,6 @@ def _market_3d_sampled(params, _pick):
         "colorscale": "RdYlGn",
         "colorbar_title": f"{color}",
         "opacity": 0.6,
-        "title": "Technical Market Structure & Momentum (sampled dataset)",
         "scene": {"x": "Ticker ID", "y": "Date", "z": z},
     }
     df["ticker_id"] = df["ticker_id"].astype(str)
