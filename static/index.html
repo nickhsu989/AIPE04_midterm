@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Technical Market Structure &amp; Momentum</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Technical Market Structure &amp; Momentum</h1>
+    <nav>
+      <label>Data source
+        <select id="source-select">
+          <option value="connected">Connected MySQL</option>
+          <option value="sampled">Sampled dataset</option>
+        </select>
+      </label>
+      <label>Time range
+        <select id="days-select">
+          <option value="30">Last 30 days</option>
+          <option value="60">Last 60 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="180">Last 180 days</option>
+          <option value="365">Last 365 days</option>
+          <option value="">All history</option>
+        </select>
+      </label>
+      <div class="symbol-control">
+        <button type="button" id="symbols-toggle" aria-haspopup="true" aria-expanded="false">
+          Symbols (tick/untick) <span id="symbols-count" class="badge">0</span>
+        </button>
+        <div id="symbols-panel" class="hidden">
+          <input type="text" id="symbols-filter" placeholder="Search symbols…"
+                 autocomplete="off">
+          <div class="symbols-actions">
+            <button type="button" id="symbols-all">All</button>
+            <button type="button" id="symbols-none">None</button>
+          </div>
+          <div id="symbols-list">
+            <!-- SYMBOLS -->
+          </div>
+        </div>
+      </div>
+      <div id="symbols-summary" class="symbols-summary"></div>
+      <div class="channel-controls">
+        <label>Z
+          <select id="channel-z">
+            <!-- CHANNEL_Z -->
+          </select>
+        </label>
+        <label>Size
+          <select id="channel-size">
+            <!-- CHANNEL_SIZE -->
+          </select>
+        </label>
+        <label>Color
+          <select id="channel-color">
+            <!-- CHANNEL_COLOR -->
+          </select>
+        </label>
+      </div>
+      <label id="threshold-control" class="threshold-control<!-- THRESHOLD_CLASS -->">Threshold (%)
+        <input type="range" id="threshold-slider" min="0" max="100" step="1"
+               value="<!-- THRESHOLD_VALUE -->">
+        <output id="threshold-output">0</output>
+      </label>
+      <a id="dashboard-link" href="http://127.0.0.1:8501" target="_blank" rel="noopener">Dashboard &#10148;</a>
+    </nav>
+  </header>
+
+  <main class="chart-area">
+    <p id="summary"><!-- SUMMARY --></p>
+    <div id="chart3d"><!-- FIGURE --></div>
+  </main>
+
+  <script>
+    // point the "Dashboard ->" link at the configured Streamlit URL (LAN-aware)
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((cfg) => {
+        const link = document.getElementById("dashboard-link");
+        if (cfg.streamlit_url) link.href = cfg.streamlit_url;
+      });
+
+    const CHANNEL_NAMES = ["z", "size", "color"];
+    const urlParams = () => new URLSearchParams(location.search);
+
+    // data-source select -> reload, preserving other params.
+    const sourceSel = document.getElementById("source-select");
+    const src = urlParams().get("source");
+    if (src === "sampled") sourceSel.value = "sampled";
+    sourceSel.addEventListener("change", () => {
+      const p = urlParams();
+      p.set("source", sourceSel.value);
+      location.href = "/?" + p.toString();
+    });
+
+    // time-range select -> reload, preserving other params.
+    // "All history" sends days= (empty) so the server omits the window.
+    const daysSel = document.getElementById("days-select");
+    const m = location.search.match(/[?&]days=(\d+)/);
+    if (m && daysSel.querySelector(`option[value="${m[1]}"]`)) daysSel.value = m[1];
+    else if (urlParams().has("days") && urlParams().get("days") === "") daysSel.value = "";
+    daysSel.addEventListener("change", () => {
+      const p = urlParams();
+      p.set("days", daysSel.value);
+      location.href = "/?" + p.toString();
+    });
+
+    // symbol tick/untick panel -> reload with symbols=<comma-joined>,
+    // preserving other params. All unticked => symbols= (empty, no rows);
+    // no param => server default (first symbol ticked).
+    const MAX_TICKED = 300;
+    const symbolsToggle = document.getElementById("symbols-toggle");
+    const symbolsPanel = document.getElementById("symbols-panel");
+    const symbolsFilter = document.getElementById("symbols-filter");
+    const symbolsList = document.getElementById("symbols-list");
+    const symbolsSummary = document.getElementById("symbols-summary");
+    const symBoxes = () => Array.from(symbolsList.querySelectorAll("input:checked"));
+    const symAll = () => Array.from(symbolsList.querySelectorAll("input"));
+    const checkedValues = () => symBoxes().map((o) => o.value);
+    const selectedSet = () => new Set(checkedValues());
+
+    const applyFilter = () => {
+      const q = symbolsFilter.value.trim().toUpperCase();
+      for (const item of symbolsList.querySelectorAll(".sym-item")) {
+        item.style.display =
+          !q || item.querySelector("span").textContent.startsWith(q) ? "" : "none";
+      }
+    };
+
+    const renderSummary = () => {
+      const picked = checkedValues();
+      symbolsSummary.textContent = "";
+      const count = document.getElementById("symbols-count");
+      count.textContent = picked.length;
+      for (const s of picked) {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "chip-x";
+        btn.textContent = "\u00d7";
+        btn.title = "Remove " + s;
+        btn.addEventListener("click", () => {
+          const next = picked.filter((x) => x !== s);
+          const p = urlParams();
+          p.set("symbols", next.join(","));
+          location.href = "/?" + p.toString();
+        });
+        chip.appendChild(document.createTextNode(s));
+        chip.appendChild(btn);
+        symbolsSummary.appendChild(chip);
+      }
+    };
+
+    const applySelection = () => {
+      const picked = checkedValues();
+      const p = urlParams();
+      p.set("symbols", picked.join(","));
+      location.href = "/?" + p.toString();
+    };
+
+    symbolsToggle.addEventListener("click", () => {
+      const open = symbolsPanel.classList.toggle("hidden");
+      symbolsToggle.setAttribute("aria-expanded", String(!open));
+      if (!open) symbolsFilter.focus();
+    });
+
+    symbolsFilter.addEventListener("input", applyFilter);
+
+    symbolsList.addEventListener("change", (ev) => {
+      if (ev.target.type !== "checkbox") return;
+      if (symBoxes().length > MAX_TICKED) {
+        ev.target.checked = false;
+        alert(`Up to ${MAX_TICKED} symbols can be ticked at once.`);
+        return;
+      }
+      applySelection();
+    });
+
+    symbolsPanel.addEventListener("click", (ev) => {
+      if (ev.target.closest("#symbols-all")) {
+        for (const box of symAll()) box.checked = true;
+        if (symBoxes().length > MAX_TICKED) {
+          for (let i = MAX_TICKED; i < symAll().length; i++) symAll()[i].checked = false;
+        }
+        applySelection();
+      } else if (ev.target.closest("#symbols-none")) {
+        for (const box of symAll()) box.checked = false;
+        applySelection();
+      }
+    });
+
+    document.addEventListener("click", (ev) => {
+      if (!symbolsPanel.classList.contains("hidden") &&
+          !ev.target.closest(".symbol-control")) {
+        symbolsPanel.classList.add("hidden");
+        symbolsToggle.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    renderSummary();
+
+    // channel selects -> reload with the chosen column mapping.
+    // The server renders the option list (per data source) and marks the
+    // current selection; changing a select just reloads with that value.
+    CHANNEL_NAMES.forEach((name) => {
+      const c = document.getElementById("channel-" + name);
+      c.addEventListener("change", () => {
+        const q = urlParams();
+        q.set(name, c.value);
+        location.href = "/?" + q.toString();
+      });
+    });
+
+    // threshold slider (binary Z channel, sampled source) -> reload with
+    // ?threshold=N, preserving the other params. Visibility is server-side:
+    // the slider only renders when Z = change_y_bin.
+    const thresholdSlider = document.getElementById("threshold-slider");
+    if (thresholdSlider) {
+      const thresholdOutput = document.getElementById("threshold-output");
+      thresholdOutput.textContent = thresholdSlider.value;
+      thresholdSlider.addEventListener("input", () => {
+        thresholdOutput.textContent = thresholdSlider.value;
+      });
+      thresholdSlider.addEventListener("change", () => {
+        const p = urlParams();
+        p.set("threshold", thresholdSlider.value);
+        location.href = "/?" + p.toString();
+      });
+    }
+  </script>
+</body>
+</html>

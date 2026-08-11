@@ -1,0 +1,3 @@
+-- This file is intentionally EMPTY.
+-- It is reserved for MySQL DDL statements only (see docs/spec.md Appendix A).
+-- When populated, run: python -c "import db; db.execute_schema()"
