@@ -1,45 +1,41 @@
-# Architecture — relationships between the project `.py` files
+# Architecture — relationships across Apps · Loaders · Core · data/
 
-Nodes are grouped by their **folder** (the diagram mirrors the real layout).
+Nodes are grouped by **category** (Apps · Loaders · Core · data/), mirroring the
+code-level relationships of the project.
 Solid arrows = direct import/usage (or file handoff). Dashed arrows = failure path / code reuse.
 Every script reads settings from `config.py` (loaded via `.env`) — one representative edge is shown.
 Not shown: `venv/`, `__pycache__/` (no relationships), and the root-level non-code files
-`.env`, `.env.example`, `requirements.txt`, `schema.sql`, `setup_finance_app.sql`, `.gitignore`.
+`.env`, `.env.example`, `requirements.txt`, `.gitignore`.
 
 ```mermaid
 flowchart TD
-    subgraph ROOT["midtermproject2/ (root)"]
+    subgraph APPS["Apps (presentation)"]
         direction LR
-        fl["app_flask.py"]
-        sl["app_streamlit.py"]
-        pres["app_presenter.py"]
-        ll["logic_layer.py"]
-        api["ingest_api.py"]
-        lc["loader_csv.py"]
+        fl["app_flask.py — main page :5000"]
+        sl["app_streamlit.py — dashboard :8501"]
+        pres["app_presenter.py — envelope → Plotly figure"]
+        subgraph STATIC["static/ (served by Flask)"]
+            idx["index.html"]
+        end
+    end
+    subgraph LOADERS["Loaders (ingestion)"]
+        direction LR
         v["verify_tickers.py"]
-        u["ingest_universe.py"]
+        api["ingest_api.py — single-symbol API pipeline"]
+        u["ingest_universe.py — bulk CSV-only export"]
         l2["load_staging2.py"]
         lratio["load_close_open_ratio.py"]
         lsam["load_sampled.py"]
         lbin["load_change_y_binary.py"]
-        db["db.py"]
-        cfg["config.py"]
+        lc["loader_csv.py — watch-folder engine"]
     end
-    subgraph STATIC["static/"]
-        idx["index.html"]
-        css["style.css"]
-    end
-    subgraph DOCS["docs/"]
-        spec["spec.md"]
-        arch["architecture.md"]
-        adesc["architecture_description.txt"]
-        png["architecture PNG"]
-    end
-    subgraph LOGS["logs/"]
-        flog["flask.log"]
-        slog["streamlit.log"]
-        l2log["load2.log"]
-        l3log["load3.log"]
+    subgraph CORE["Core (backend)"]
+        direction LR
+        ll["logic_layer.py — metric registry + envelopes"]
+        db["db.py — centralized MySQL access"]
+        cfg["config.py — settings (.env)"]
+        sch["schema.sql — empty DDL placeholder"]
+        setup["setup_finance_app.sql — one-time DB setup"]
     end
     subgraph DATA["data/"]
         direction LR
@@ -54,7 +50,7 @@ flowchart TD
             stg["&lt;SYM&gt;_1y.csv"]
         end
         subgraph STAG2["staging2/"]
-            s2["&lt;SYM&gt;_max.csv"]
+            s2["&lt;SYM&gt;_max.csv (~7,240 exports)"]
         end
         subgraph UP["uploads/"]
             up["*.csv"]
@@ -92,6 +88,8 @@ flowchart TD
     api --> db
     lc --> db
     db --> mysql
+    setup -.-> mysql
+    db -.-> sch
     db --> cfg
     ll --> db
     fl --> ll
@@ -99,27 +97,29 @@ flowchart TD
     sl --> pres
     sl --> db
     fl -.-> idx
-    idx --> css
 ```
 
 ## Legend
 
-| Node | Role |
-|------|------|
-| `app_flask.py` | Flask main page: 3D market chart, serves `static/index.html` |
-| `app_streamlit.py` | Streamlit dashboard, reuses the same logic-layer metrics |
-| `app_presenter.py` | Shared helper: Logic Layer envelope → Plotly figure |
-| `logic_layer.py` | THE Logic Layer: metric registry, canonical envelopes |
-| `verify_tickers.py` | Existence check of universe symbols on yfinance → `data/universe/verify_ok.csv` / `verify_bad.csv` |
-| `ingest_universe.py` | Bulk full-history export to `data/staging2/` (CSV-only, resumable) |
-| `load_staging2.py` | Loads `data/staging2/` CSVs into MySQL; failures → `data/universe/verified_rejected.csv` |
-| `load_close_open_ratio.py` | Computes `close/open` per row from `data/staging2/` CSVs into `close_open_ratio_chgpct` (PK `(symbol, trade_date)`, joins to `price_history` by primary key) |
-| `load_sampled.py` | Self-contained loader: creates `sampled_market_data` + upserts `data/sampled_184408.csv` |
-| `load_change_y_binary.py` | Self-contained loader: creates `change_y_binary` (PK `(ticker_id, date)`, mirrors `sampled_market_data`) from the same CSV |
-| `ingest_api.py` | Single-symbol yfinance pipeline (pandas + numpy cleaning → staging CSV → MySQL) |
-| `loader_csv.py` | Bulk CSV upload engine (polls `data/uploads/` → `processed/` \| `rejected/`) |
-| `db.py` | Centralized MySQL access (backend only; UIs never touch MySQL directly) |
-| `config.py` | Single source of truth for settings (`.env`) |
+| Category | Node | Role |
+|----------|------|------|
+| Apps | `app_flask.py` | Flask main page: 3D market chart, serves `static/index.html`, `/api/config` |
+| Apps | `app_streamlit.py` | Streamlit dashboard, reuses the same logic-layer metrics |
+| Apps | `app_presenter.py` | Shared helper: Logic Layer envelope → Plotly figure |
+| Apps | `static/index.html` | Flask template: symbol listbox, Z/Size/Color selects, threshold slider |
+| Loaders | `verify_tickers.py` | Existence check of universe symbols on yfinance → `data/universe/verify_ok.csv` / `verify_bad.csv` |
+| Loaders | `ingest_universe.py` | Bulk full-history export to `data/staging2/` (CSV-only, resumable) |
+| Loaders | `ingest_api.py` | Single-symbol yfinance pipeline (pandas + numpy cleaning → staging CSV → MySQL) |
+| Loaders | `load_staging2.py` | Loads `data/staging2/` CSVs into MySQL; failures → `data/universe/verified_rejected.csv` |
+| Loaders | `load_close_open_ratio.py` | Computes `close/open` per row from `data/staging2/` CSVs into `close_open_ratio_chgpct` (PK `(symbol, trade_date)`, joins to `price_history` by primary key) |
+| Loaders | `load_sampled.py` | Self-contained loader: creates `sampled_market_data` + upserts `data/sampled_184408.csv` |
+| Loaders | `load_change_y_binary.py` | Self-contained loader: creates `change_y_binary` (PK `(ticker_id, date)`, mirrors `sampled_market_data`) from the same CSV |
+| Loaders | `loader_csv.py` | Bulk CSV upload engine (polls `data/uploads/` → `processed/` \| `rejected/`) |
+| Core | `logic_layer.py` | THE Logic Layer: metric registry, canonical envelopes (`history`, `market_3d`, `change_y_binary`) |
+| Core | `db.py` | Centralized MySQL access (backend only; UIs never touch MySQL directly) |
+| Core | `config.py` | Single source of truth for settings (`.env`) |
+| Core | `schema.sql` | Empty DDL placeholder, executed by `db.execute_schema()` |
+| Core | `setup_finance_app.sql` | One-time MySQL setup: creates DB `finance_app`, user, base tables |
 
 ## The ingestion pipelines
 
