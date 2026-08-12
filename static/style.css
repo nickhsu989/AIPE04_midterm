@@ -28,18 +28,39 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+.layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  height: 100vh;
+}
+
 .topbar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
+  flex-direction: column;
+  align-items: stretch;
+  padding: 16px;
+  border-right: 1px solid var(--border);
   background: var(--panel);
+  overflow-y: auto;
 }
 
 .topbar h1 { font-size: 1.1rem; margin: 0; }
 
-.topbar nav { display: flex; gap: 10px; align-items: center; }
+.topbar-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+#dashboard-link {
+  margin-left: auto;
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.topbar nav { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
 
 .topbar nav > label,
 .channel-controls label,
@@ -50,13 +71,22 @@ body {
   font-size: 0.75rem;
 }
 
-.channel-controls {
-  display: flex;
-  gap: 6px;
-  align-items: flex-end;
+#source-select,
+#days-select {
+  width: 100%;
+  min-width: 0;
 }
 
-.channel-controls select { padding: 4px 6px; }
+.channel-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.channel-controls select {
+  width: 100%;
+  min-width: 0;
+}
 
 .threshold-control { white-space: nowrap; }
 
@@ -214,14 +244,18 @@ a { text-decoration: none; }
   border-radius: 6px;
 }
 
-.hidden { display: none; }
+.hidden,
+.topbar nav > label.hidden { display: none; }
 
 .chart-area {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-  padding: 0 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 12px;
+  min-width: 0;
 }
+
+#chart3d { flex: 1; min-height: 0; }
 
 #chart { height: 480px; }
 
@@ -239,6 +273,7 @@ a { text-decoration: none; }
 .table-wrap th { background: var(--panel); }
 
 @media (max-width: 700px) {
-  .chart-area { grid-template-columns: 1fr; }
-  .topbar { flex-direction: column; gap: 8px; }
+  .layout { grid-template-columns: 1fr; height: auto; }
+  .topbar { border-right: none; border-bottom: 1px solid var(--border); }
+  .topbar nav { flex-direction: row; flex-wrap: wrap; }
 }

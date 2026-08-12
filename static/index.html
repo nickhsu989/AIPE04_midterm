@@ -3,13 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Technical Market Structure &amp; Momentum</title>
+  <title>5D Plot</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 </head>
 <body>
+  <div class="layout">
   <header class="topbar">
-    <h1>Technical Market Structure &amp; Momentum</h1>
+    <div class="topbar-head">
+      <h1>5D Plot</h1>
+      <a id="dashboard-link" href="http://127.0.0.1:8501" target="_blank" rel="noopener">Go to 2D Plot &#10148;</a>
+    </div>
     <nav>
       <label>Data source
         <select id="source-select">
@@ -66,7 +70,6 @@
                value="<!-- THRESHOLD_VALUE -->">
         <output id="threshold-output">0</output>
       </label>
-      <a id="dashboard-link" href="http://127.0.0.1:8501" target="_blank" rel="noopener">Dashboard &#10148;</a>
     </nav>
   </header>
 
@@ -74,6 +77,7 @@
     <div id="chart3d"><!-- FIGURE --></div>
     <p id="summary"><!-- SUMMARY --></p>
   </main>
+  </div>
 
   <script>
     // point the "Dashboard ->" link at the configured Streamlit URL (LAN-aware)
@@ -219,7 +223,7 @@
 
     // threshold slider (binary Z channel, sampled source) -> reload with
     // ?threshold=N, preserving the other params. Visibility is server-side:
-    // the slider only renders when Z = change_y_bin.
+    // the slider only renders when Z = change_bin.
     const thresholdSlider = document.getElementById("threshold-slider");
     if (thresholdSlider) {
       const thresholdOutput = document.getElementById("threshold-output");
@@ -234,5 +238,194 @@
       });
     }
   </script>
+
+  <script>
+    // Fixed-stage 3D scene, v3: the gray planes (yz left, xz bottom, xy
+    // back) stay pinned to the screen while the DATA rotates around them.
+    //
+    // plotly.js has no fixed-background feature — the whole scene (planes,
+    // grid, ticks, points) is drawn as one WebGL unit driven by the
+    // gl-plot3d camera, so a moving camera always drags the planes with
+    // it. This engine therefore NEVER lets the camera move and rotates the
+    // point cloud itself:
+    //   - plotly's drag/dblclick input is suppressed with window-level
+    //     capture-phase pointerdown/mousedown/dblclick blockers (guarded
+    //     to events whose target is inside #chart3d), so the orbit camera
+    //     can never arm — wheel zoom and hover keep working;
+    //   - the drag is handled here: horizontal drag accumulates yaw,
+    //     vertical drag accumulates pitch; the base arrays are rotated
+    //     (R_y(yaw) . R_x(pitch)) and pushed via Plotly.restyle on trace 0
+    //     only (rAF-throttled);
+    //   - scene axis ranges are widened once so rotated points never fall
+    //     outside the fixed stage;
+    //   - Bounds lock (v3): every restyle makes gl3d recompute its box
+    //     bounds from the trace data (dataScale -> glplot.setBounds), so a
+    //     rotating cloud used to re-shape the gray frame every frame.
+    //     Now the base data is normalized to the unit sphere (max norm 1,
+    //     which any rotation preserves), and an invisible 8-point anchor
+    //     trace is added at the cube corners (±1,±1,±1). The combined
+    //     bounds are therefore exactly [-1,1]^3 on every frame, dataScale
+    //     is constant, and the frame cannot move, by construction.
+    (function () {
+      if (typeof Plotly === "undefined") return;
+      var chart3d = document.getElementById("chart3d");
+      if (!chart3d) return;
+
+      var ready = false;
+
+      function findPlot() {
+        var gd = chart3d.querySelector(".js-plotly-plot");
+        if (!gd || !gd._fullLayout || !gd._fullLayout.scene) return null;
+        return gd;
+      }
+
+      function setup(gd) {
+        ready = true;
+        console.log("[fixed-stage] v3 engine live");
+        var trace = gd.data[0];
+        if (!trace || !trace.x || !trace.x.length) return;
+
+        var nRows = trace.x.length;
+        var baseX = Float64Array.from(trace.x);
+        var baseY = Float64Array.from(trace.y);
+        var baseZ = Float64Array.from(trace.z);
+        var yaw = 0, pitch = 0;
+        var dragging = false, lastX = 0, lastY = 0, raf = 0;
+        var ROTATION_STEP = 0.008; // radians per pixel
+        var MAX_PITCH = 1.55;      // ~89deg, keeps the stage readable
+
+        // Normalize to the unit sphere (max norm 1): rotation preserves
+        // norms, so the cloud can never leave [-1,1]^3 and the anchor
+        // corners below pin the scene bounds to exactly that box.
+        var maxNorm = 0;
+        for (var i = 0; i < nRows; i++) {
+          var norm = Math.sqrt(
+            baseX[i] * baseX[i] + baseY[i] * baseY[i] + baseZ[i] * baseZ[i]);
+          if (norm > maxNorm) maxNorm = norm;
+        }
+        if (maxNorm > 0) {
+          for (var i = 0; i < nRows; i++) {
+            baseX[i] /= maxNorm;
+            baseY[i] /= maxNorm;
+            baseZ[i] /= maxNorm;
+          }
+        }
+
+        // Fix the stage: symmetric ranges big enough that any rotation of
+        // the unit-sphere data stays inside. Range-only relayout — never
+        // touches axis types.
+        var maxX = 0, maxY = 0, maxZ = 0;
+        for (var i = 0; i < nRows; i++) {
+          if (baseX[i] > maxX) maxX = baseX[i];
+          if (baseZ[i] > maxZ) maxZ = baseZ[i];
+          var ay = baseY[i] < 0 ? -baseY[i] : baseY[i];
+          if (ay > maxY) maxY = ay;
+        }
+        var rx = Math.max(maxX + maxZ, 1), rz = rx;
+        var ry = Math.max(maxY + maxZ, 1);
+        Plotly.relayout(gd, {
+          "scene.xaxis.range": [-rx, rx],
+          "scene.yaxis.range": [-ry, ry],
+          "scene.zaxis.range": [-rz, rz],
+        }).catch(function () {});
+
+        // Invisible anchor trace at the cube corners: the gl3d box bounds
+        // stay at exactly [-1,1]^3 on every frame, so the planes never
+        // re-shape while the data rotates.
+        var ax = [], ay = [], az = [];
+        for (var sx = -1; sx <= 1; sx += 2) {
+          for (var sy = -1; sy <= 1; sy += 2) {
+            for (var sz = -1; sz <= 1; sz += 2) {
+              ax.push(sx); ay.push(sy); az.push(sz);
+            }
+          }
+        }
+        Plotly.addTraces(gd, [{
+          type: "scatter3d",
+          mode: "markers",
+          x: ax, y: ay, z: az,
+          marker: { color: "rgba(0,0,0,0)", size: 1 },
+          hoverinfo: "skip",
+          showlegend: false,
+        }]);
+
+        gd._context.doubleClick = false; // safety; dblclick is blocked below too
+
+        function render() {
+          raf = 0;
+          var cy = Math.cos(yaw), sy = Math.sin(yaw);
+          var cp = Math.cos(pitch), sp = Math.sin(pitch);
+          var ox = new Float64Array(nRows);
+          var oy = new Float64Array(nRows);
+          var oz = new Float64Array(nRows);
+          for (var i = 0; i < nRows; i++) {
+            var x = baseX[i], y = baseY[i], z = baseZ[i];
+            var y1 = y * cp - z * sp;    // R_x(pitch): top tips toward viewer
+            var z1 = y * sp + z * cp;
+            var x2 = x * cy + z1 * sy;   // R_y(yaw): drag right spins right
+            var z2 = -x * sy + z1 * cy;
+            ox[i] = x2; oy[i] = y1; oz[i] = z2;
+          }
+          // trace 0 only — never touch the anchor trace.
+          Plotly.restyle(gd, { x: ox, y: oy, z: oz }, [0]);
+        }
+
+        function requestRender() {
+          if (!raf) raf = requestAnimationFrame(render);
+        }
+
+        // Suppress plotly's own drag camera (the whole reason the planes
+        // stayed put): window-level capture, so the event dies before ANY
+        // plotly/gl-plot3d handler (container, document or window level)
+        // can see it. Only events targeted inside the chart are blocked.
+        function block(ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+        window.addEventListener("pointerdown", function (ev) {
+          if (!chart3d.contains(ev.target)) return;
+          block(ev);
+          dragging = true;
+          lastX = ev.clientX;
+          lastY = ev.clientY;
+        }, true);
+        window.addEventListener("mousedown", function (ev) {
+          if (chart3d.contains(ev.target)) block(ev);
+        }, true);
+        window.addEventListener("dblclick", function (ev) {
+          if (chart3d.contains(ev.target)) block(ev);
+        }, true);
+
+        window.addEventListener("pointermove", function (ev) {
+          if (!dragging) return;
+          var dx = ev.clientX - lastX;
+          var dy = ev.clientY - lastY;
+          lastX = ev.clientX;
+          lastY = ev.clientY;
+          yaw += dx * ROTATION_STEP;
+          pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, pitch + dy * ROTATION_STEP));
+          block(ev);
+          requestRender();
+        }, true);
+
+        window.addEventListener("pointerup", function () {
+          if (!dragging) return;
+          dragging = false;
+          if (raf) { cancelAnimationFrame(raf); raf = 0; }
+          render();
+        }, true);
+      }
+
+      var tries = 0;
+      var timer = setInterval(function () {
+        var gd = findPlot();
+        if (gd && !ready) {
+          try { setup(gd); }
+          catch (err) { console.error("fixed-stage init failed:", err); }
+        }
+        tries++;
+        if (ready || tries > 200) clearInterval(timer);
+      }, 50);
+    })();
+  </script>
 </body>
-</html>

@@ -12,13 +12,13 @@ platform. For the full architecture, see `docs/spec.md`.
 | Load into MySQL (full pass) | DONE — 7,227 ok / 13 rejected | `logs/load2.log`: `DONE ok=7227 err=13 rows=32930670 of 7240` |
 | Load refresh re-run | CLOSED (2026-08-09 audit) — stopped deliberately at `BIRD` (~790/7,240 files, last_sync 18:08); the refresh was dropped: it reloads the same local CSVs (see "Resume actions") | `logs/load3.log` |
 | Rejected registry | DONE — 13 symbols in `data/universe/verified_rejected.csv`; `load_staging2.py` auto-appends failures (deduped) | file + §8 |
-| Sampled snapshot load | DONE — 184,408 rows / 32 dates / 5,992 tickers into `sampled_market_data` | `load_sampled.py` + §8 |
+| Sampled snapshot load | DONE — 1,476,711 rows / 251 dates / 6,704 tickers into `sampled_market_data` (from `data/for_train_y_2025_11_18sample.csv`, keyed by ticker symbol) | `load_sampled.py` + §8 |
 | Close/Open ratio table | DONE — `close_open_ratio_chgpct` (PK `symbol`+`trade_date`, `close/open`) loaded from all 7,240 staging2 CSVs | `load_close_open_ratio.py` + §8 |
 
 DB totals: `instruments` 7,338 · `price_history` 32,934,291 rows · `ingest_log`
 15,346 ok / 220 error (api 7,251 ok / 205 err; csv 8,095 ok / 15 err — the 13
 rejected symbols are unique, rest are dev-phase probes) · `sampled_market_data`
-184,408 rows.
+1,476,711 rows.
 
 **Resume playbook (next session):**
 
@@ -40,9 +40,10 @@ rejected symbols are unique, rest are dev-phase probes) · `sampled_market_data`
   - Resume/skip logic in `load_staging2.py`: dropped — it existed only to
     speed up the refresh above; the loader is already idempotent (upsert).
   - Re-run `load_sampled.py` on an updated `data/sampled_184408.csv` with a
-    `symbol` column: deferred indefinitely — the file has not arrived and no
-    feature joins on `symbol` (the upsert still fills it in place if it ever
-    does, see §8).
+    `symbol` column: closed as superseded (2026-08-12) — the dataset swap
+    landed first: `data/for_train_y_2025_11_18sample.csv` is loaded and the
+    sampled table is keyed by real ticker symbols (the old CSV remains on
+    disk as an archive, unreferenced).
   - Fix the 13 rejected symbols (value sanitization): closed as won't-fix —
     the CSVs contain corrupt yfinance values (`open/high/low` up to ~5e14
     vs. the `DECIMAL(18,6)` cap ~1e12; `adj_close` `-inf` / `-1e28`), the
@@ -64,9 +65,9 @@ it in MySQL, computes analytics in a single replaceable
   the `market_3d` metric in `logic_layer.py`; a **Data source** toggle in
   the topbar switches between the connected MySQL tables
   (`price_history`, `source=connected`) and the sampled snapshot dataset
-  (`sampled_market_data`, `source=sampled`); in sampled mode the Z
-  dropdown offers the **binary view** (`change_y_bin`, a 0/1 flag from
-  `change_y > threshold` with a topbar threshold slider)
+  (`sampled_market_data`, `source=sampled`, keyed by ticker symbol); in
+  sampled mode the Z dropdown offers the **binary view** (`change_bin`, a
+  0/1 flag from `change >= threshold` with a topbar threshold slider)
 - **Dashboard** — Streamlit secondary page, linked from the main page
   (http://127.0.0.1:8501), with a "Return to Main Page" button
 
@@ -91,8 +92,7 @@ midtermproject2/
 ├── ingest_api.py         # yfinance → cleaning → staging CSV → MySQL
 ├── ingest_universe.py    # bulk export: every data/universe/verify_ok.csv symbol, max history → data/staging2/
 ├── load_staging2.py      # loads data/staging2/ CSVs into MySQL
-├── load_sampled.py       # self-contained: creates sampled_market_data + upserts data/sampled_184408.csv
-├── load_change_y_binary.py # self-contained: creates change_y_binary (PK ticker_id+date) from the same CSV
+├── load_sampled.py       # self-contained: creates sampled_market_data (PK symbol+date) + upserts data/for_train_y_2025_11_18sample.csv
 ├── load_close_open_ratio.py # self-contained: creates close_open_ratio_chgpct (PK symbol+trade_date, close/open) from data/staging2/
 ├── logic_layer.py        # THE logic layer: metric registry + envelopes
 ├── app_presenter.py      # envelope → Plotly figure (shared)
@@ -105,7 +105,8 @@ midtermproject2/
 ├── logs/                 # runtime logs (flask.log, streamlit.log, load2/load3.log)
 └── data/
     ├── universe/         # tickerinventory.csv, verify_ok.csv, verify_bad.csv, verified_rejected.csv
-    ├── sampled_184408.csv # sampled snapshot dataset (loaded by load_sampled.py)
+    ├── for_train_y_2025_11_18sample.csv # sampled snapshot dataset (loaded by load_sampled.py)
+    ├── sampled_184408.csv # archived superseded snapshot (unreferenced)
     ├── staging/          # API ingestion staging CSVs
     ├── staging2/         # full-history export checkpoints (<SYM>_max.csv)
 ```
@@ -181,7 +182,7 @@ What it creates:
 
 The sampled snapshot table `sampled_market_data` is **not** created here —
 `load_sampled.py` creates it itself with `CREATE TABLE IF NOT EXISTS`
-(see §8) and loads `data/sampled_184408.csv` into it.
+(see §8) and loads `data/for_train_y_2025_11_18sample.csv` into it.
 
 To use different credentials, edit the `CREATE USER` line in
 `setup_finance_app.sql` and set the same values in `.env`.
@@ -438,60 +439,55 @@ DONE ok=7240 err=0 rows=... of 7240
 
 `load_sampled.py` is self-contained: it creates the `sampled_market_data`
 table in the same `finance_app` database (`CREATE TABLE IF NOT EXISTS`,
-DDL lives only in the script) and bulk-upserts `data/sampled_184408.csv`
-(184,408 rows · 32 dates · 5,992 ticker_ids). It has no foreign keys —
-it is a standalone snapshot table.
+DDL lives only in the script) and bulk-upserts
+`data/for_train_y_2025_11_18sample.csv`
+(1,476,711 rows · 251 dates · 6,704 ticker symbols). It has no foreign
+keys — it is a standalone snapshot table. The archived
+`data/sampled_184408.csv` (old integer-`ticker_id` snapshot) is kept on
+disk but never read.
 
 ```bash
 python load_sampled.py --max 5          # smoke test: first 5 rows
 python load_sampled.py                  # load the whole file
 ```
 
-- PK is `(ticker_id, date)`; upserts are idempotent — re-running never
-  duplicates rows and writes one `ingest_log` row per run.
+- PK is `(symbol, date)` — the CSV's `Ticker` column (real ticker symbols,
+  uppercased) replaces the old integer `ticker_id` identity; upserts are
+  idempotent — re-running never duplicates rows and writes one `ingest_log`
+  row per run (source `csv`, symbol `sample_20251118` — fits the
+  `VARCHAR(16)` log column).
 - `date` is parsed from the CSV's `YYYYMMDD` integers into a real MySQL
   `DATE` column.
-- The table carries a nullable `symbol VARCHAR(16)` column (indexed via
-  `idx_symbol`) that is **NULL** in the current file. When the updated CSV
-  with a `symbol` column appended is dropped in, re-running the same command
-  fills `symbol` in place (the upsert updates every column, including
-  `symbol`), ready for a later `JOIN` against `instruments.symbol`.
+- `Market_Cap` carries human-formatted values (`40.78B` = billion, `M` =
+  million, `K` = thousand) and is expanded to the actual number; rows whose
+  `Ticker` cell is empty or the literal `nan` are dropped (251 such rows in
+  this file) — they have no usable identity.
+- The file is 572 MB: it is read in chunks (`chunksize` 200k); the few
+  columns mixing numbers with formatted strings are read as `str` to quiet
+  pandas' mixed-type warning.
 - Identifier gotcha handled in the code: MySQL reserved words / digit-leading
   names (`change`, `52w_low`, `52w_high`) are backtick-quoted everywhere.
 
 Expected output:
 
 ```
-OK: data/sampled_184408.csv -> 184408 rows (symbols filled: 0)
+OK: data/for_train_y_2025_11_18sample.csv -> 1476711 rows (symbols filled: 1476711)
 ```
 
 Verify in MySQL:
 
 ```sql
-SELECT COUNT(*), COUNT(DISTINCT date), COUNT(DISTINCT ticker_id),
-       COUNT(symbol), MIN(date), MAX(date) FROM sampled_market_data;
--- 184408 | 32 | 5992 | 0 | 2025-09-10 | 2025-10-23
+SELECT COUNT(*), COUNT(DISTINCT date), COUNT(DISTINCT symbol),
+       MIN(date), MAX(date) FROM sampled_market_data;
+-- 1476711 | 251 | 6704 | 2024-11-18 | 2025-11-18
 ```
 
-**Change_y binary table (`change_y_binary`):**
-
-`load_change_y_binary.py` mirrors `load_sampled.py`: it creates
-`change_y_binary` (`CREATE TABLE IF NOT EXISTS`, DDL in the script) with the
-**same PK `(ticker_id, date)`** as `sampled_market_data` plus a nullable
-`symbol` column, and bulk-upserts the sampled CSV's `change_y` column
-(idempotent; one `ingest_log` row per run). It stores **only the raw
-value** — the binary conversion happens at **query time**.
-
-```bash
-python load_change_y_binary.py --max 5          # smoke test: first 5 rows
-python load_change_y_binary.py                  # load the whole file
-```
-
-Expected output:
-
-```
-OK: data/sampled_184408.csv -> 184408 rows (symbols filled: 0)
-```
+**Binary view (`change_bin`):** the dataset has no `ChangeY` column, so the
+binary 0/1 view now derives from the daily `Change` column instead. The
+mirror table `change_y_binary` and its loader
+`load_change_y_binary.py` no longer exist — the flag is computed **at
+query time** from `sampled_market_data.change` (see the main-page section
+below).
 
 **Close/Open ratio table (`close_open_ratio_chgpct`):**
 
@@ -526,14 +522,18 @@ DONE ok=7240 err=0 rows=... of 7240
 **Binary view (main page, `source=sampled`):** the binary view is
 integrated into the main :5000 page — no separate `/binary` page. With
 `source=sampled`, the **Z dropdown** offers the computed channel
-`change_y_bin`: the 0/1 flag (`change_y > threshold -> 1`, `change_y <=
+`change_bin`: the 0/1 flag (`change >= threshold -> 1`, `change <
 threshold -> 0`) is computed **at query time** by `market_3d` in SQL
-(`CASE WHEN b.change_y > %s THEN 1 ELSE 0 END`, `LEFT JOIN change_y_binary`
-on the shared `(ticker_id, date)` key). A **threshold slider** (0–100,
-step 1, default 0) appears in the topbar only while `change_y_bin` is
-selected as Z; it sends `?threshold=N` (negative or unparseable values
-fall back to 0, clamped 0–100). Below the 3D chart, a one-line summary
-shows ("N rows · M above threshold (p%)"). The `change_y_binary` metric in
+(`CASE WHEN s.change >= %s THEN 1 ELSE 0 END` against
+`sampled_market_data.change`). A **threshold slider** (0–100,
+step 1, default 0) appears in the topbar only while `change_bin` is
+selected as Z; otherwise the server tags the slider element `hidden`,
+and `static/style.css` enforces it via the `.topbar nav > label.hidden`
+rule (specificity fix — `.topbar nav > label`'s `display: flex` would
+otherwise override `.hidden`, see §11). It sends `?threshold=N`
+(negative or unparseable values fall back to 0, clamped 0–100). Below
+the 3D chart, a one-line summary shows ("N rows · M above threshold
+(p%)"). The `change_binary` metric in
 `logic_layer.py` is retained as a standalone metric for direct calls.
 
 ---
@@ -548,8 +548,8 @@ Registered metrics (exactly what the apps display):
 | Metric | Used by |
 |---|---|
 | `history` | Streamlit dashboard (fixed price-history view) |
-| `market_3d` | Flask main page 3D chart (internal — not user-selectable); `source=sampled` Z channel `change_y_bin` is the binary 0/1 view (`change_y > threshold -> 1 / else 0` computed at query time from the `threshold` param, ≥ 0) |
-| `change_y_binary` | standalone metric retained for direct calls — `change_y > threshold -> 1 / else 0` at query time from the `threshold` param (≥ 0); the main page shows the same via `market_3d`'s `change_y_bin` Z channel |
+| `market_3d` | Flask main page 3D chart (internal — not user-selectable); `source=sampled` Z channel `change_bin` is the binary 0/1 view (`change >= threshold -> 1 / else 0` computed at query time from the `threshold` param, ≥ 0) |
+| `change_binary` | standalone metric retained for direct calls — `change >= threshold -> 1 / else 0` at query time from the `threshold` param (≥ 0); the main page shows the same via `market_3d`'s `change_bin` Z channel |
 
 The main page 3D chart has **fixed channels**: X = `symbol`, Y =
 `trade_date`, hover = `symbol`. Z/Size/Color are user-selectable dropdowns
@@ -565,12 +565,17 @@ metric applies no window. The symbol listbox ticks/unticks symbols via the
 source" dropdown switches which table `market_3d` reads.
 
 - `source=sampled` (default) — `sampled_market_data`: x = `date`, y = the
-  selectable channel (default `change_y_bin`), z = `ticker_id` (depth),
+  selectable channel (default `change_bin`), z = `symbol` (depth),
   channels from `SAMPLED_NUMERIC_COLUMNS` (market_cap, price, rsi_14,
-  change, …) with defaults Y = `change_y_bin`, Size = `volume`, Color = `change`;
+  change, …) with defaults Y = `change_bin`, Size = `market_cap`, Color = `perf_year`;
+  the Size dropdown offers only `SAMPLED_SIZE_COLUMNS` (price/volume
+  family — always non-negative: market_cap, volume, avg_volume,
+  prev_close, price, 52w_low, 52w_high, atr, rsi_14) and the Color
+  dropdown only `SAMPLED_COLOR_COLUMNS` (perf/sma family:
+  perf_ytd…perf_year, sma20/50/200, rel_volume, change);
   the Z dropdown additionally offers the computed binary channel
-  `change_y_bin` (`SAMPLED_CHANNEL_COLUMNS`); the symbol listbox lists
-  ticker_ids instead (`symbol_list("sampled")`), `symbols=4405` filters one
+  `change_bin` (`SAMPLED_CHANNEL_COLUMNS`); the symbol listbox lists
+  ticker symbols (`symbol_list("sampled")`), `symbols=A` filters one
   ticker, and `days` windows off `MAX(date)` from the sampled table.
 - `source=connected` — existing behavior: `price_history`, x = `symbol`,
   y = `trade_date`, channels from `NUMERIC_COLUMNS`, symbol listbox from
@@ -616,6 +621,7 @@ it via `logic_layer.handle_request` — no app file changes.
 | Dashboard "Return to Main Page" dead | `FTE_MAIN_URL` mismatch or Flask not running on 5000 |
 | App dies when I close the SSH session | background jobs need `nohup` (or run under `tmux`/`screen`) — see §7 "Start the app over SSH" |
 | Sampled mode shows `ProgrammingError 1064` | server running an old `logic_layer.py` (reserved/digit-leading columns like `change`, `52w_*` must be backtick-quoted) → restart Flask |
+| Threshold (%) slider always visible even when Z ≠ `change_bin` | CSS specificity regression — `.topbar nav > label { display: flex }` overrides `.hidden`; keep `.topbar nav > label.hidden { display: none }` in `static/style.css` (the slider only shows when the sampled Z channel is `change_bin`) |
 
 ---
 
@@ -632,15 +638,14 @@ curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?days=90&symbols
 python ingest_api.py --symbol AAPL --period 5d                          # OK: AAPL -> N rows (staging: data/staging/AAPL_5d.csv)
 python load_staging2.py --max 5                                         # smoke load; failures auto-recorded to data/universe/verified_rejected.csv
 python load_sampled.py --max 5                                          # smoke load: first 5 rows -> sampled_market_data
-python load_change_y_binary.py --max 5                                 # smoke load: first 5 rows -> change_y_binary
 python load_close_open_ratio.py --max 5                                # smoke load: first 5 files -> close_open_ratio_chgpct
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'symbols':'4405','z':'rsi_14'})['status'])"
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_y_bin','threshold':0})['status'])"
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_y_bin','threshold':10})['status'])"
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_y_bin','threshold':-5})['status'])"   # negative -> falls back to 0
-python -c "import logic_layer; print(logic_layer.symbol_list('sampled'))"  # e.g. ['0', '1', '2', ...] ticker_ids
-curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&days=30&symbols=4405"
-curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&days=30&z=change_y_bin&threshold=10"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'symbols':'A','z':'rsi_14'})['status'])"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_bin','threshold':0})['status'])"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_bin','threshold':10})['status'])"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_bin','threshold':-5})['status'])"   # negative -> falls back to 0
+python -c "import logic_layer; print(logic_layer.symbol_list('sampled'))"  # e.g. ['A', 'AA', 'AACB', ...] ticker symbols
+curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&days=30&symbols=A"
+curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&days=30&z=change_bin&threshold=10"
 ```
 
 `data/universe/verified_rejected.csv` must contain exactly the header `symbol` plus the 13
@@ -650,7 +655,7 @@ repeat load (dedupe check).
 
 Then open http://127.0.0.1:5000 — the page loads in **sampled** mode by
 default and the 3D market chart renders in front view (camera perpendicular
-to the x/y plane: date × change_y_bin × ticker_id); confirm the time-range
+to the x/y plane: date × change_bin × symbol); confirm the time-range
 select works. Switch the **Data source** dropdown to "Connected MySQL" and
 back — the chart should use the sampled channel defaults with the 0/1 flag
 on the vertical axis, the threshold slider visible, and the summary line

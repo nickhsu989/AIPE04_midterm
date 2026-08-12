@@ -26,7 +26,6 @@ flowchart TD
         l2["load_staging2.py"]
         lratio["load_close_open_ratio.py"]
         lsam["load_sampled.py"]
-        lbin["load_change_y_binary.py"]
     end
     subgraph CORE["Core (backend)"]
         direction LR
@@ -38,7 +37,7 @@ flowchart TD
     end
     subgraph DATA["data/"]
         direction LR
-        smp["sampled_184408.csv"]
+        smp["for_train_y_2025_11_18sample.csv"]
         subgraph UNIV["universe/"]
             ti["tickerinventory.csv"]
             vok["verify_ok.csv"]
@@ -53,12 +52,11 @@ flowchart TD
         end
     end
     yf["yfinance API"]
-    mysql[("MySQL finance_app: instruments · price_history · ingest_log · sampled_market_data · change_y_binary · close_open_ratio_chgpct")]
+    mysql[("MySQL finance_app: instruments · price_history · ingest_log · sampled_market_data · close_open_ratio_chgpct")]
 
     yf --> v
     yf --> api
     smp --> lsam
-    smp --> lbin
     v --> vok
     v --> vbad
     vok --> u
@@ -71,7 +69,6 @@ flowchart TD
     l2 --> db
     lratio --> db
     lsam --> db
-    lbin --> db
     api --> db
     db --> mysql
     setup -.-> mysql
@@ -91,15 +88,15 @@ flowchart TD
 | Apps | `app_flask.py` | Flask main page: 3D market chart, serves `static/index.html`, `/api/config` |
 | Apps | `app_streamlit.py` | Streamlit dashboard, reuses the same logic-layer metrics |
 | Apps | `app_presenter.py` | Shared helper: Logic Layer envelope → Plotly figure |
-| Apps | `static/index.html` | Flask template: symbol listbox, Z/Size/Color selects, threshold slider |
+| Apps | `static/index.html` | Flask template: symbol listbox, Z/Size/Color selects, threshold slider (server-gated — hidden unless Z = `change_bin`) |
+| Apps | `static/style.css` | Layout + dark/light themes; `.hidden` utility extended for the topbar label (`.topbar nav > label.hidden`) that gates slider visibility |
 | Loaders | `verify_tickers.py` | Existence check of universe symbols on yfinance → `data/universe/verify_ok.csv` / `verify_bad.csv` |
 | Loaders | `ingest_universe.py` | Bulk full-history export to `data/staging2/` (CSV-only, resumable) |
 | Loaders | `ingest_api.py` | Single-symbol yfinance pipeline (pandas + numpy cleaning → staging CSV → MySQL) |
 | Loaders | `load_staging2.py` | Loads `data/staging2/` CSVs into MySQL; failures → `data/universe/verified_rejected.csv` |
 | Loaders | `load_close_open_ratio.py` | Computes `close/open` per row from `data/staging2/` CSVs into `close_open_ratio_chgpct` (PK `(symbol, trade_date)`, joins to `price_history` by primary key) |
-| Loaders | `load_sampled.py` | Self-contained loader: creates `sampled_market_data` + upserts `data/sampled_184408.csv` |
-| Loaders | `load_change_y_binary.py` | Self-contained loader: creates `change_y_binary` (PK `(ticker_id, date)`, mirrors `sampled_market_data`) from the same CSV |
-| Core | `logic_layer.py` | THE Logic Layer: metric registry, canonical envelopes (`history`, `market_3d`, `change_y_binary`) |
+| Loaders | `load_sampled.py` | Self-contained loader: creates `sampled_market_data` (PK `(symbol, date)`) + upserts `data/for_train_y_2025_11_18sample.csv` |
+| Core | `logic_layer.py` | THE Logic Layer: metric registry, canonical envelopes (`history`, `market_3d`, `change_binary`) |
 | Core | `db.py` | Centralized MySQL access (backend only; UIs never touch MySQL directly) |
 | Core | `config.py` | Single source of truth for settings (`.env`) |
 | Core | `schema.sql` | Empty DDL placeholder, executed by `db.execute_schema()` |
@@ -123,18 +120,17 @@ flowchart TD
 
 - `ingest_api.py` → `data/staging/<SYM>.csv` → MySQL (single symbol, e.g. `--symbol AAPL --period 1y`)
 
-**Pipeline C — sampled snapshot** (standalone tables, no foreign keys):
+**Pipeline C — sampled snapshot** (standalone table, no foreign keys):
 
-- `data/sampled_184408.csv` → `load_sampled.py` → MySQL `sampled_market_data`
-  (PK `(ticker_id, date)`; nullable `symbol` column, currently NULL, ready for
-  a later `JOIN` against `instruments`; read by the Flask main page via
-  `market_3d` with `source=sampled`).
-- `data/sampled_184408.csv` → `load_change_y_binary.py` → MySQL
-  `change_y_binary` (PK `(ticker_id, date)`, same key shape as
-  `sampled_market_data`; stores the raw `change_y` column only). The binary
-  0/1 conversion (`change_y > threshold -> 1`) is computed **at query time**
-  by the `market_3d` logic-layer metric's `change_y_bin` Z channel on the
-  main page (sampled source; threshold slider 0–100, must be ≥ 0).
+- `data/for_train_y_2025_11_18sample.csv` → `load_sampled.py` → MySQL
+  `sampled_market_data`
+  (PK `(symbol, date)` — the CSV's `Ticker` column replaces the old integer
+  `ticker_id` identity; the binary 0/1 flag (`change >= threshold -> 1`) is
+  computed **at query time** by the `market_3d` logic-layer metric's
+  `change_bin` Z channel directly from `sampled_market_data.change` on the
+  main page (sampled source; threshold slider 0–100, must be ≥ 0). The old
+  `change_y_binary` mirror table and its loader were removed in the 2026-08-12
+  dataset swap.
 
 Pipelines A and B upsert into `instruments` + `price_history` and write one
 `ingest_log` row per run, all via `db.py` (Pipeline C also writes one
@@ -142,16 +138,14 @@ Pipelines A and B upsert into `instruments` + `price_history` and write one
 
 ## MySQL schema — entity-relationship diagram
 
-Six tables. Exactly one declared foreign key (`price_history.symbol →
-instruments.symbol`); the other three cross-table relationships are
+Five tables. Exactly one declared foreign key (`price_history.symbol →
+instruments.symbol`); the other cross-table relationships are
 **logical same-key-shape joins** (enforced in SQL by loaders/queries, not by
 DB constraints).
 
 ```mermaid
 erDiagram
     INSTRUMENTS ||--o{ PRICE_HISTORY : "FK fk_px_symbol · ON DELETE CASCADE"
-    INSTRUMENTS ||--o{ SAMPLED_MARKET_DATA : "symbol (logical — nullable, currently NULL)"
-    SAMPLED_MARKET_DATA ||--o| CHANGE_Y_BINARY : "(ticker_id, date) same key shape"
     PRICE_HISTORY ||--o| CLOSE_OPEN_RATIO_CHGPCT : "(symbol, trade_date) same key shape"
 
     INSTRUMENTS {
@@ -175,9 +169,8 @@ erDiagram
     }
 
     SAMPLED_MARKET_DATA {
-        int ticker_id PK
+        varchar(16) symbol PK
         date date PK
-        varchar(16) symbol
         decimal market_cap "decimal(20,6)"
         bigint _52w_low "52w_low · decimal(18,6)"
         decimal prev_close "decimal(18,6)"
@@ -198,14 +191,6 @@ erDiagram
         decimal perf_week "decimal(18,6)"
         decimal rel_volume "decimal(18,6)"
         decimal change "decimal(18,6)"
-        decimal change_y "decimal(18,6)"
-    }
-
-    CHANGE_Y_BINARY {
-        int ticker_id PK
-        date date PK
-        varchar(16) symbol
-        decimal change_y "decimal(18,6)"
     }
 
     CLOSE_OPEN_RATIO_CHGPCT {
@@ -231,12 +216,11 @@ erDiagram
 - **Declared FK (the only one):** `price_history.symbol` → `instruments.symbol`
   (`fk_px_symbol`, `ON DELETE CASCADE`).
 - **Logical same-key-shape joins** (enforced in SQL, not by constraints):
-  - `change_y_binary` mirrors `sampled_market_data` on `(ticker_id, date)` —
-    joined at query time by the `market_3d` metric (`LEFT JOIN change_y_binary`).
   - `close_open_ratio_chgpct` mirrors `price_history` on `(symbol, trade_date)` —
     primary-key `JOIN` used by `load_close_open_ratio.py` / queries.
-  - `sampled_market_data.symbol` is nullable and currently NULL — ready for a
-    later `JOIN` against `instruments`.
+  - `sampled_market_data` is keyed by `(symbol, date)` — the binary `change_bin`
+    flag is computed at query time from its own `change` column (the former
+    `change_y_binary` mirror table was removed in the 2026-08-12 dataset swap).
 - **`ingest_log`** — standalone audit table (auto-increment `id`); every
   loader writes one row per run; no foreign keys.
 - Attribute names rendered with a leading underscore (`_52w_low`,
@@ -244,7 +228,7 @@ erDiagram
   `52w_low` / `52w_high` — mermaid v11 cannot render attribute names that
   start with a digit; the real column name is shown in the attribute
   comment.
-- Full DDL for all six tables: `docs/spec.md` Appendix A.
+- Full DDL for all five tables: `docs/spec.md` Appendix A.
 
 Notes:
 - `verify_tickers.py` and `app_presenter.py` are standalone — no imports from other project files.

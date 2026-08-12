@@ -21,21 +21,18 @@ The platform ingests external market data through a yfinance API pipeline, store
 
 ```
                     yfinance API                     sampled snapshot
-                        │                           data/sampled_184408.csv
+                        │                           for_train_y_2025_11_18sample.csv
                         ▼                                  │
                 ingest_api.py                        load_sampled.py
               (requests/yfinance →          (self-contained: creates
-               pandas/numpy clean →         sampled_market_data +
-               staging CSV → insert)        upserts snapshot rows)
+               pandas/numpy clean →         sampled_market_data, PK
+               staging CSV → insert)        symbol+date, upserts rows)
                         │                                  │
-                        │                      load_change_y_binary.py
-                        │                      (creates change_y_binary,
-                        │                       PK ticker_id+date, §5.5)
                         ▼                                  ▼
               ┌────────────────────────────────────────────────────────────────────┐
               │              Storage Tier (MySQL, db.py)                          │
               │  instruments · price_history · ingest_log · sampled_market_data   │
-              │  · change_y_binary · close_open_ratio_chgpct                      │
+              │  · close_open_ratio_chgpct                                         │
               └────────────────────────────────────────────────────────────────────┘
                         │            ▲
                         │ SQL reads │ (backend only — no client access)
@@ -92,8 +89,7 @@ midtermproject2/
 ├── db.py                     # pymysql connection + execute_schema() + query/insert helpers
 ├── ingest_api.py             # yfinance → DataFrame → numpy cleaning → staging CSV → MySQL
 ├── ingest_universe.py        # bulk full-history export (CSV-only, resumable) → data/staging2/ (§5.4)
-├── load_sampled.py           # creates sampled_market_data + upserts data/sampled_184408.csv (§5.3)
-├── load_change_y_binary.py   # creates change_y_binary (PK ticker_id+date) from the same CSV (§5.5)
+├── load_sampled.py           # creates sampled_market_data (PK symbol+date) + upserts data/for_train_y_2025_11_18sample.csv (§5.3)
 ├── load_staging2.py          # loads data/staging2/ CSVs → MySQL; failures → verified_rejected.csv (§5.4)
 ├── load_close_open_ratio.py  # creates close_open_ratio_chgpct (PK symbol+trade_date, close/open) from the same CSVs (§5.6)
 ├── verify_tickers.py         # checks universe symbols against yfinance → verify_ok/bad.csv (§5.4)
@@ -107,7 +103,8 @@ midtermproject2/
 ├── docs/                     # this spec + architecture.md + original architecture_description.txt
 ├── logs/                     # runtime logs (flask.log, streamlit.log, load2/load3.log)
 └── data/
-    ├── sampled_184408.csv    # sampled snapshot dataset (§5.3)
+    ├── for_train_y_2025_11_18sample.csv  # sampled snapshot dataset (§5.3)
+    ├── sampled_184408.csv  # archived superseded snapshot (unreferenced)
     ├── universe/             # tickerinventory.csv, verify_ok.csv, verify_bad.csv, verified_rejected.csv (§5.4)
     ├── staging/              # ingest_api.py writes staged CSVs here
     ├── staging2/             # ingest_universe.py export checkpoints (<SYM>_max.csv) (§5.4)
@@ -174,31 +171,39 @@ Rate-limit handling: on yfinance failure, log and retry once with a short sleep;
 
 ### 5.3 Sampled snapshot loader — `load_sampled.py`
 
-CLI: `python load_sampled.py [--file data/sampled_184408.csv] [--max N]`
+CLI: `python load_sampled.py [--file data/for_train_y_2025_11_18sample.csv] [--max N]`
 
-Loads the sampled daily snapshot (`data/sampled_184408.csv`: 184,408 rows,
-32 dates, 5,992 ticker_ids) into a **standalone** table
-`sampled_market_data` in the same `finance_app` database — no foreign keys.
+Loads the sampled daily snapshot (`data/for_train_y_2025_11_18sample.csv`:
+1,476,711 rows, 251 dates, 6,704 ticker symbols) into a **standalone**
+table `sampled_market_data` in the same `finance_app` database — no foreign
+keys. The archived `data/sampled_184408.csv` (old integer-`ticker_id`
+snapshot) is kept on disk but never read.
 
 1. `CREATE TABLE IF NOT EXISTS sampled_market_data` (DDL below, in-script
-   only) — PK `(ticker_id, date)`, nullable `symbol VARCHAR(16)` +
-   `INDEX idx_symbol`.
-2. Read the CSV with pandas; rename headers to snake_case; parse the
-   `YYYYMMDD` integer `date` column into a MySQL `DATE`; coerce numerics.
-3. Upsert via `INSERT ... ON DUPLICATE KEY UPDATE` covering **every**
-   column (unlike `db.insert_rows`, which excludes `symbol` — here `symbol`
-   must be updatable). This makes reloads idempotent.
-4. Write one `ingest_log` row (`source=csv`, `symbol=sampled_184408`).
-
-**Future symbol linkage:** the current CSV has only integer `Ticker_id`, so
-`symbol` stays NULL. When the updated CSV with a `symbol` column appended is
-loaded, the loader uppercases/strips it and the upsert fills `symbol` in
-place — enabling a later `JOIN sampled_market_data.symbol =
-instruments.symbol`.
+   only) — PK `(symbol, date)`: the CSV's `Ticker` column (real ticker
+   symbols, uppercased) **replaces the old integer `ticker_id` identity**.
+2. Read the CSV with pandas **in chunks** (`chunksize` 200k — the file is
+   572 MB); rename headers to snake_case; parse the `YYYYMMDD` integer
+   `date` column into a MySQL `DATE`; coerce numerics.
+3. `Market_Cap` carries human-formatted values (`40.78B` = billion, `M` =
+   million, `K` = thousand, `-`/empty = NULL) and is expanded to the actual
+   number; a few columns mixing numbers with formatted strings are read as
+   `str` to quiet pandas' mixed-type warning.
+4. Rows whose `Ticker` cell is empty or the literal `nan` are dropped
+   (251 such rows in this file) — no usable identity.
+5. Upsert via `INSERT ... ON DUPLICATE KEY UPDATE` covering **every**
+   column — idempotent reloads.
+6. Write one `ingest_log` row (`source=csv`, `symbol=sample_20251118` —
+   the compressed label keeps under `ingest_log.symbol VARCHAR(16)`).
 
 **Identifier quoting:** every column reference is backtick-quoted in the
 DDL and SQL because several names are not bare identifiers in MySQL:
 `change` (reserved word) and `52w_low` / `52w_high` (leading digits).
+
+**Binary view:** the dataset has no `ChangeY` column, so the binary 0/1
+view now derives from the daily `Change` column at **query time** — the
+mirror table `change_y_binary` and its loader `load_change_y_binary.py`
+no longer exist (§5.5 removed, see §6.3).
 
 ### 5.4 Bulk universe pipeline — `verify_tickers.py` / `ingest_universe.py` / `load_staging2.py`
 
@@ -227,47 +232,22 @@ best-effort and deduped to `data/universe/verified_rejected.csv` (header
 `symbol`) so failures can be reviewed without grepping logs. Current
 registry: 13 symbols.
 
-### 5.5 Change_y binary table — `load_change_y_binary.py`
+### 5.5 ~~Change_y binary table~~ — removed (2026-08-12)
 
-CLI: `python load_change_y_binary.py [--file data/sampled_184408.csv] [--max N]`
-
-Self-contained loader (same pattern as §5.3) that creates the table
-`change_y_binary` in the same `finance_app` database — **no foreign keys**,
-mirroring `sampled_market_data`:
-
-```sql
-CREATE TABLE IF NOT EXISTS change_y_binary (
-  `ticker_id`   INT NOT NULL,
-  `date`        DATE NOT NULL,
-  `symbol`      VARCHAR(16) NULL,
-  `change_y`    DECIMAL(18,6),
-  PRIMARY KEY (`ticker_id`, `date`),
-  INDEX idx_symbol (`symbol`)
-) ENGINE=InnoDB
-```
-
-1. PK `(ticker_id, date)` is **identical to `sampled_market_data`** — the
-   "via primary key" connection between the snapshot dataset and this table.
-2. Reads the same CSV as `load_sampled.py`; maps `ChangeY` → `change_y`,
-   parses the `YYYYMMDD` `date`, coerces numerics, uppercases `symbol` when
-   present (nullable; currently NULL in the file).
-3. Upserts via `INSERT ... ON DUPLICATE KEY UPDATE` covering `change_y` and
-   `symbol` — idempotent re-runs.
-4. One `ingest_log` row per run.
-
-**Query-time binary conversion (not stored):** the table holds only the raw
-`change_y`. The `market_3d` metric converts it per request when its
-`change_y_bin` Z channel is selected (§6.3): `CASE WHEN b.change_y > %s
-THEN 1 ELSE 0 END AS change_y_bin` against `change_y_binary`, where `%s` is
-the caller's `threshold` (int, **≥ 0**; negative or unparseable → 0). The
-`change_y_binary` metric (§6.3) still converts the same way for direct
-calls.
+The `change_y_binary` mirror table and its loader `load_change_y_binary.py`
+**no longer exist**. The dataset swap to
+`data/for_train_y_2025_11_18sample.csv` dropped the `ChangeY` column, making
+the mirror redundant: `change` now lives in `sampled_market_data` itself,
+and the binary 0/1 flag is computed **at query time** by `market_3d`'s
+`change_bin` Z channel (§6.3) — `CASE WHEN s.change >= %s THEN 1 ELSE 0 END`
+against `sampled_market_data`, no join needed. See `load_sampled.py` (§5.3)
+and the `change_binary` metric (§6.3).
 
 ### 5.6 Close/Open ratio table — `load_close_open_ratio.py`
 
 CLI: `python load_close_open_ratio.py [--dir data/staging2] [--suffix max] [--max N]`
 
-Self-contained loader (same pattern as §5.3/§5.5) that creates the table
+Self-contained loader (same pattern as §5.3) that creates the table
 `close_open_ratio_chgpct` in the same `finance_app` database — **no foreign
 keys**, connected to `price_history` **via primary key**:
 
@@ -332,7 +312,7 @@ Metric functions are pure: `(params) -> DataFrame`. They query only via `db.quer
 ```
 
 Rules:
-- `chart.type` ∈ `line | bar | scatter | candlestick | table` (the types `app_presenter` implements) — plus `scatter3d` for `market_3d` and `change_y_binary`, rendered by `app_flask`.
+- `chart.type` ∈ `line | bar | scatter | candlestick | table` (the types `app_presenter` implements) — plus `scatter3d` for `market_3d` and `change_binary`, rendered by `app_flask`.
 - `market_3d`'s `chart` additionally carries the full column→channel mapping (`z`, `size`, `hover`, `color`) and visual knobs (`colorscale`, `colorbar_title`, `opacity`) so column-assignment changes happen only in the logic layer.
 - `rows` are JSON-safe lists aligned to `columns`.
 - Errors: `{"status": "error", "meta": {"errors": [...]}, "columns": [], "rows": []}`.
@@ -342,27 +322,39 @@ Rules:
 | slug | used by | returns |
 |---|---|---|
 | `history` | Streamlit dashboard | raw OHLCV rows, chronological order oldest-first (line/candlestick); optional `days` trailing window; `limit` (default 250, `0` = no limit) |
-| `market_3d` | Flask main page (internal, not user-selectable) | decimated window of OHLCV columns + `chart` metadata mapping columns to the 3D scene; with `source=connected`: `x=symbol`, `y=trade_date` are **fixed** channels, `z/size/color` params override which numeric MySQL column drives each remaining channel (defaults: close/volume/adj_close, validated with fallback to defaults). **`source` param** (see below) switches the table and channels; with `source=sampled` (the page default) the scene maps `x=date` (time), `y` = the selectable channel (default `change_y_bin`), `z=ticker_id` (depth) — the **binary view**, a 0/1 flag computed at query time from `threshold` (≥ 0, default 0, negative/unparseable → 0) via `CASE WHEN b.change_y > %s THEN 1 ELSE 0 END` against `change_y_binary` (joined on the shared `(ticker_id, date)` PK), with `meta` counts (`above`/`total`) for the page summary |
-| `change_y_binary` | standalone (retained for direct calls) | sampled `change_y` → 0/1 flag at query time: `threshold` (int ≥ 0, default 0, negative/unparseable → 0); `change_y > threshold` → 1 else 0; optional `symbols` (ticker_ids), `days` window, `limit`; `chart` = `scatter3d` (x = `ticker_id`, y = `date`, z = `change_y`, color = `change_y_bin`) + `meta` counts (`above`/`total`) — the main page shows the same view via `market_3d`'s `change_y_bin` default Y-axis mapping |
+| `market_3d` | Flask main page (internal, not user-selectable) | decimated window of OHLCV columns + `chart` metadata mapping columns to the 3D scene; with `source=connected`: `x=symbol`, `y=trade_date` are **fixed** channels, `z/size/color` params override which numeric MySQL column drives each remaining channel (defaults: close/volume/adj_close, validated with fallback to defaults). **`source` param** (see below) switches the table and channels; with `source=sampled` (the page default) the scene maps `x=date` (time), `y` = the selectable channel (default `change_bin`), `z=symbol` (depth) — the **binary view**, a 0/1 flag computed at query time from `threshold` (≥ 0, default 0, negative/unparseable → 0) via `CASE WHEN s.change >= %s THEN 1 ELSE 0 END` against `sampled_market_data.change` (the `change_y_binary` mirror table no longer exists), with `meta` counts (`above`/`total`) for the page summary |
+| `change_binary` | standalone (retained for direct calls) | sampled `change` → 0/1 flag at query time: `threshold` (int ≥ 0, default 0, negative/unparseable → 0); `change >= threshold` → 1 else 0; optional `symbols` (ticker symbols), `days` window, `limit`; `chart` = `scatter3d` (x = `symbol`, y = `date`, z = `change`, color = `change_bin`) + `meta` counts (`above`/`total`) — the main page shows the same view via `market_3d`'s `change_bin` default Y-axis mapping |
 
 **`source` param (`market_3d` only):** `sampled` (default) reads
-`sampled_market_data`: `x=date`, `y` = the selectable channel (default
-`change_y_bin`), `z=ticker_id`, hover = `ticker_id`; `z/size/color` validate
-against `SAMPLED_NUMERIC_COLUMNS` (`market_cap`, `52w_low`, `prev_close`,
+`sampled_market_data` (keyed `(symbol, date)`): `x=date`, `y` = the
+selectable channel (default `change_bin`), `z=symbol`, hover = `symbol`;
+`z/size/color` channels come from
+`SAMPLED_NUMERIC_COLUMNS` (`market_cap`, `52w_low`, `prev_close`,
 `price`, `volume`, `52w_high`, `perf_ytd`, `perf_year`, `sma200`,
 `perf_half_y`, `avg_volume`, `perf_quarter`, `sma50`, `perf_month`,
-`sma20`, `atr`, `rsi_14`, `perf_week`, `rel_volume`, `change`, `change_y`)
-with defaults z=`change_y_bin`, size=`volume`, color=`change`; **the Z channel
-additionally offers the computed binary channel `change_y_bin`
-(`SAMPLED_CHANNEL_COLUMNS` = `SAMPLED_NUMERIC_COLUMNS` + `change_y_bin`) —
-selecting it joins `change_y_binary` on the shared `(ticker_id, date)` PK
-and returns `CASE WHEN b.change_y > %s THEN 1 ELSE 0 END AS change_y_bin`
-from the `threshold` param (§6.3), plus `meta` above/total counts** (in
+`sma20`, `atr`, `rsi_14`, `perf_week`, `rel_volume`, `change`)
+with defaults z=`change_bin`, size=`market_cap`, color=`perf_year`; the
+**Size and Color dropdowns are restricted subsets** of
+`SAMPLED_NUMERIC_COLUMNS` — Size offers `SAMPLED_SIZE_COLUMNS` (price/volume
+family — always non-negative, since Plotly marker size requires values
+>= 0: `market_cap`, `volume`, `avg_volume`, `prev_close`, `price`,
+`52w_low`, `52w_high`, `atr`, `rsi_14`),
+Color offers `SAMPLED_COLOR_COLUMNS` (perf/sma family, may be negative:
+`perf_ytd` … `perf_year`, `sma20/50/200`, `rel_volume`, `change`) —
+`size` validates against `SAMPLED_SIZE_COLUMNS` and `z`/`color` against the
+full `SAMPLED_NUMERIC_COLUMNS`; **the Z channel
+additionally offers the computed binary channel `change_bin`
+(`SAMPLED_CHANNEL_COLUMNS` = `SAMPLED_NUMERIC_COLUMNS` + `change_bin`) —
+selecting it computes `CASE WHEN s.change >= %s THEN 1 ELSE 0 END AS
+change_bin`
+from the `threshold` param (§6.3) directly against
+`sampled_market_data.change` (the `change_y_binary` mirror table no longer
+exists), plus `meta` above/total counts** (in
 sampled mode the Z dropdown drives the scene's Y axis; the depth axis is
-always `ticker_id`); the
+always `symbol`); the
 `days` window offs from `MAX(date)` of the sampled table; `symbols`
-filters raw `ticker_id`s (matching `symbol_list("sampled")`, which returns
-distinct ticker_ids instead of instrument symbols). `source=connected`
+filters ticker symbols (matching `symbol_list("sampled")`, which returns
+distinct symbols from `sampled_market_data`). `source=connected`
 reads `price_history` instead: `x=symbol`, `y=trade_date`, z/size/color
 defaults close/volume/adj_close, symbol listbox from `instruments`.
 
@@ -381,7 +373,7 @@ All math is plain SQL (window functions) + simple Python formatting. pandas is u
 
 ### 6.4 Extension rule (the contract)
 
-> **To adjust what the main page chart shows (fixed x/y, z/size/color columns, default/empty states): edit only `market_3d` + `symbol_list` in `logic_layer.py`** — the `SELECT` (which columns exist) and its returned `chart` dict. No app file changes. (Restart the Flask server after editing imported modules.) The `source` branch is part of `market_3d`; the per-source channel dropdown options are rendered by `app_flask._channel_options` from the same `NUMERIC_COLUMNS` / `SAMPLED_NUMERIC_COLUMNS` constants (Z in sampled mode additionally offers `SAMPLED_CHANNEL_COLUMNS`, i.e. `SAMPLED_NUMERIC_COLUMNS` + the computed `change_y_bin`).
+> **To adjust what the main page chart shows (fixed x/y, z/size/color columns, default/empty states): edit only `market_3d` + `symbol_list` in `logic_layer.py`** — the `SELECT` (which columns exist) and its returned `chart` dict. No app file changes. (Restart the Flask server after editing imported modules.) The `source` branch is part of `market_3d`; the per-source channel dropdown options are rendered by `app_flask._channel_options` from the logic-layer constants (`NUMERIC_COLUMNS` for connected; for sampled, Z uses `SAMPLED_CHANNEL_COLUMNS` = `SAMPLED_NUMERIC_COLUMNS` + the computed `change_bin`, Size uses `SAMPLED_SIZE_COLUMNS`, Color uses `SAMPLED_COLOR_COLUMNS` — the latter two are restricted subsets of `SAMPLED_NUMERIC_COLUMNS`, with defaults `market_cap` / `perf_year`).
 >
 > **To add a new analytics view:** (1) write one `@register` function in `logic_layer.py`, (2) call it via `logic_layer.handle_request` from the app that displays it. The Streamlit dashboard is a fixed price-history view and does not expose a metric menu (§7.2).
 
@@ -392,7 +384,7 @@ All math is plain SQL (window functions) + simple Python formatting. pandas is u
 ### 7.1 Flask — MAIN page (`app_flask.py`)
 
 - `GET /` — serves `static/index.html` with the 3D scatter figure injected server-side from the `market_3d` envelope (`app_flask._chart_html` → `logic_layer.handle_request`), rendered without the Plotly modebar toolbar (`config={"displayModeBar": False}`) and with a front-view camera on load (`scene.camera` eye on the depth axis — perpendicular to the x/y plane; users can still rotate). The page defaults to `source=sampled` (no `?source=` param). TTL-cached per `(source, days, symbols, z, size, color, threshold)`.
-- **Binary view on the main page:** with `source=sampled` (the default), the Z dropdown renders the computed `change_y_bin` option (`SAMPLED_CHANNEL_COLUMNS`) and drives the scene's Y axis (x = date, z = ticker_id); while it is selected a threshold slider (`<input type="range">`, 0–100, step 1) appears in the topbar and reloads `/?threshold=N` (clamped server-side to `0..BINARY_MAX_THRESHOLD`); the page also renders a one-line summary below the 3D chart from the `market_3d` envelope's `above`/`total` meta counts. There is no separate `/binary` page anymore.
+- **Binary view on the main page:** with `source=sampled` (the default), the Z dropdown renders the computed `change_bin` option (`SAMPLED_CHANNEL_COLUMNS`) and drives the scene's Y axis (x = date, z = symbol); while it is selected a threshold slider (`<input type="range">`, 0–100, step 1) appears in the topbar and reloads `/?threshold=N` (clamped server-side to `0..BINARY_MAX_THRESHOLD`); the slider is hidden otherwise — the page tags the element `hidden` and `static/style.css`'s `.topbar nav > label.hidden` rule enforces it (CSS specificity: without it, `.topbar nav > label`'s `display: flex` would override `.hidden`); the page also renders a one-line summary below the 3D chart from the `market_3d` envelope's `above`/`total` meta counts. There is no separate `/binary` page anymore.
 - Main page topbar has a time-range dropdown (Last 30 days default / 60 / 90 / 180 / 365 / **All history**), a multi-select symbol listbox (default: first symbol ticked; `symbols=` = none ticked, `symbols=A,B` = those only; options injected at `<!-- SYMBOLS -->` from `logic_layer.symbol_list()`), and Z/Size/Color dropdowns (numeric-only, validated with fallback). Each change reloads `/?days=…&symbols=…&z=…&size=…&color=…`; `days=` (empty) means all history. `GET /api/config` is also served; the nav bar uses it for the **hyperlink** to the Streamlit secondary page (`FTE_STREAMLIT_URL`).
 
 ### 7.2 Streamlit — secondary page (`app_streamlit.py`)
@@ -520,8 +512,8 @@ Upserts use `INSERT ... ON DUPLICATE KEY UPDATE` (idempotent re-runs).
 
 ## Appendix B — Canonical envelope reference
 
-- Producers: `logic_layer.handle_request(metric, params)` — called by `app_streamlit.py` (`history`) and `app_flask._chart_html` (`market_3d`, including the binary `change_y_bin` Z channel).
-- Envelope shape per §6.2. `chart.type` ∈ `line | bar | scatter | candlestick | table`, plus `scatter3d` for `market_3d` (and the retained `change_y_binary` metric), rendered by `app_flask`.
+- Producers: `logic_layer.handle_request(metric, params)` — called by `app_streamlit.py` (`history`) and `app_flask._chart_html` (`market_3d`, including the binary `change_bin` Z channel).
+- Envelope shape per §6.2. `chart.type` ∈ `line | bar | scatter | candlestick | table`, plus `scatter3d` for `market_3d` (and the retained `change_binary` metric), rendered by `app_flask`.
 - Consumers: `app_presenter.envelope_to_figure` (Streamlit) and `app_flask._chart_html` (main page 3D chart, binary included).
 
 ---
