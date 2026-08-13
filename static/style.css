@@ -30,27 +30,37 @@ body {
 
 .layout {
   display: grid;
-  grid-template-columns: 300px 1fr;
-  height: 100vh;
+  grid-template-rows: auto 1fr;
+  height: 110vh;
 }
 
 .topbar {
   display: flex;
   flex-direction: column;
+  flex-wrap: wrap;
   align-items: stretch;
-  padding: 16px;
-  border-right: 1px solid var(--border);
+  gap: 12px 16px;
+  padding: 10px 16px;
+  min-height: 128px;
+  border-bottom: 1px solid var(--border);
   background: var(--panel);
-  overflow-y: auto;
 }
 
-.topbar h1 { font-size: 1.1rem; margin: 0; }
+.topbar h1 { font-size: 2.2rem; font-weight: 700; line-height: 1.2; margin: 0; }
 
 .topbar-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.topbar-head label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
 }
 
 #dashboard-link {
@@ -60,7 +70,15 @@ body {
   white-space: nowrap;
 }
 
-.topbar nav { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
+.topbar nav { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
+
+.topbar nav .time-range { margin-left: auto; }
+
+#engine-status {
+  font-size: 0.75rem;
+  color: var(--fg);
+  white-space: nowrap;
+}
 
 .topbar nav > label,
 .channel-controls label,
@@ -71,7 +89,6 @@ body {
   font-size: 0.75rem;
 }
 
-#source-select,
 #days-select {
   width: 100%;
   min-width: 0;
@@ -79,8 +96,9 @@ body {
 
 .channel-controls {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 12px 16px;
 }
 
 .channel-controls select {
@@ -100,6 +118,12 @@ body {
 
 .symbol-control {
   position: relative;
+}
+
+.symbol-title {
+  display: block;
+  font-size: 0.75rem;
+  margin-bottom: 2px;
 }
 
 #symbols-toggle {
@@ -273,7 +297,7 @@ a { text-decoration: none; }
 .table-wrap th { background: var(--panel); }
 
 @media (max-width: 700px) {
-  .layout { grid-template-columns: 1fr; height: auto; }
-  .topbar { border-right: none; border-bottom: 1px solid var(--border); }
+  .layout { grid-template-rows: auto auto; height: auto; }
+  #chart3d { height: 66vh; }
   .topbar nav { flex-direction: row; flex-wrap: wrap; }
 }

@@ -69,8 +69,9 @@ it in MySQL, computes analytics in a single replaceable
   the topbar switches between the connected MySQL tables
   (`price_history`, `source=connected`) and the sampled snapshot dataset
   (`sampled_market_data`, `source=sampled`, keyed by ticker symbol); in
-  sampled mode the Z dropdown offers the **binary view** (`change_bin`, a
-  0/1 flag from `change >= threshold` with a topbar threshold slider)
+  sampled mode the Z dropdown drives the scene's Y axis and defaults to
+  `prev_close`, with the **binary view** (`change_bin`, a 0/1 flag from
+  `change >= threshold` with a topbar threshold slider) still selectable
 - **Dashboard** — Streamlit secondary page, linked from the main page
   (http://127.0.0.1:8501), with a "Return to Main Page" button
 

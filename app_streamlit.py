@@ -68,18 +68,19 @@ def envelope_to_figure(envelope):
 
 HEADERS = {
     "trade_date": "Trade Date", "open": "Open", "high": "High", "low": "Low",
-    "close": "Close", "adj_close": "Adj Close", "volume": "Volume",
+    "close": "Close", "adj_close": "Adj Close", "volume_yf": "Volume",
 }
 
 WINDOW_OPTIONS = {
     "Last 30 days": 30,
     "Last 60 days": 60,
     "Last 90 days": 90,
+    "Last 180 days": 180,
     "Last 365 days": 365,
-    "All": 0,
+    "All history": 0,
 }
 
-st.set_page_config(page_title="2D Plot", layout="wide")
+st.set_page_config(page_title="2D Plot streamlit 8501", layout="wide")
 
 st.markdown(
     """
@@ -88,6 +89,7 @@ st.markdown(
     #MainMenu { visibility: hidden; }
     .stAppHeader,
     [data-testid="stAppHeader"] { display: none; }
+    [data-testid="stTooltipHoverTarget"] { display: none !important; }
     .block-container { padding-top: 0.2rem; }
     </style>
     """,
@@ -113,13 +115,13 @@ if not symbols:
     st.warning("No data ingested yet. Run: python ingest.py, python load_staging.py, python load_close_open_ratio.py")
     st.stop()
 
-sym_col, win_col = st.columns([1, 4], vertical_alignment="center")
+_, sym_col, _, win_col = st.columns([5, 2, 3, 2], vertical_alignment="center")
 with sym_col:
     default_idx = symbols.index("AAPL") if "AAPL" in symbols else 0
     symbol = st.selectbox("Symbol", symbols, index=default_idx)
 with win_col:
-    window = st.radio("Window", list(WINDOW_OPTIONS), index=0, horizontal=True,
-                      help="Default: last 30 days; All = full history")
+    window = st.selectbox("Time range", list(WINDOW_OPTIONS), index=0,
+                          help="Default: last 30 days; All history = full history")
 
 params = {"symbol": symbol, "limit": 0}
 if WINDOW_OPTIONS[window]:
@@ -129,7 +131,7 @@ envelope = logic_layer.handle_request("history", params)
 if envelope["status"] == "error":
     st.error(" | ".join(envelope["meta"].get("errors", [])))
 elif envelope["status"] == "empty":
-    st.warning(f"No price data for {symbol} in price_history. Ingest via python ingest.py then python load_staging.py")
+    st.warning(f"No price data for {symbol} in the unified dataset. Ingest via python ingest.py, python load_staging.py, python unify_databases.py")
 else:
     st.plotly_chart(envelope_to_figure(envelope), width="stretch")
     if envelope["rows"]:
