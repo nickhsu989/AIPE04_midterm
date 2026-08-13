@@ -20,10 +20,10 @@ import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
-UNIVERSE_DIR = os.path.join(os.path.dirname(__file__), "data", "universe")
-SRC = os.path.join(UNIVERSE_DIR, "tickerinventory.csv")
-OUT_OK = os.path.join(UNIVERSE_DIR, "verify_ok.csv")
-OUT_BAD = os.path.join(UNIVERSE_DIR, "verify_bad.csv")
+CHECK_DIR = os.path.join(os.path.dirname(__file__), "data", "check_exist")
+SRC = os.path.join(CHECK_DIR, "tickerinventory.csv")
+OUT_OK = os.path.join(CHECK_DIR, "verify_ok.csv")
+OUT_BAD = os.path.join(CHECK_DIR, "verify_bad.csv")
 
 
 def load(path):

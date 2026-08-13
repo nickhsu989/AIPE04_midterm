@@ -8,7 +8,6 @@ __pycache__/
 
 # Runtime artifacts
 data/staging/*
-data/staging2/*
 data/uploads/*
 data/processed/*
 data/rejected/*

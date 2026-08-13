@@ -33,6 +33,8 @@ import pandas as pd
 
 import db
 
+from config import CFG
+
 # Cap the number of plotted points (logic-layer concern, not the UI's).
 MAX_POINTS = 250_000
 
@@ -59,6 +61,17 @@ SAMPLED_NUMERIC_COLUMNS = (
 )
 SAMPLED_DEFAULT_CHANNELS = {"z": BINARY_CHANNEL, "size": "market_cap", "color": "perf_year"}
 SOURCES = ("connected", "sampled")
+
+# Whitelist config accessors. Only these keys are exposed to the apps — DB
+# credentials (DB_*) never cross this boundary; they stay with db.py.
+def get_urls():
+    """Return the inter-app URLs (main + streamlit) for the UIs' nav links."""
+    return {"main_url": CFG.get("FTE_MAIN_URL"), "streamlit_url": CFG.get("FTE_STREAMLIT_URL")}
+
+
+def get_bind_host():
+    """Return the host the Flask app should bind to."""
+    return CFG.get("FTE_BIND_HOST", "127.0.0.1")
 
 # Z-dropdown candidates for sampled mode: the real metric columns plus the
 # computed binary channel. Size/Color stay on SAMPLED_NUMERIC_COLUMNS only.
@@ -91,7 +104,7 @@ def register(fn):
 
 def symbol_list(source="connected"):
     """Every ingested symbol (instruments table), alphabetical — the
-    universe for the main-page tick/untick listbox.
+    symbol pool for the main-page tick/untick listbox.
 
     source="sampled" lists the sampled_market_data symbols instead
     (x-axis identity for the sampled dataset mode).
@@ -244,7 +257,7 @@ def market_3d(params):
         elif symbols is not None:
             message = "No rows for the selected symbols."
         else:
-            message = "No data ingested yet. Run: python ingest_api.py --symbol AAPL --period 1y"
+            message = "No data ingested yet. Run: python ingest.py, python load_staging.py, python load_close_open_ratio.py"
         return (
             pd.DataFrame(), "market_3d", "scatter3d", "symbol", "trade_date", window_label,
             {"meta": {"message": message}},

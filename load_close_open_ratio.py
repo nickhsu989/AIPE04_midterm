@@ -1,7 +1,7 @@
-"""load_close_open_ratio.py — load data/staging2/<SYM>_max.csv into MySQL table
+"""load_close_open_ratio.py — load data/staging/<SYM>_max.csv into MySQL table
 close_open_ratio_chgpct (same finance_app database).
 
-Companion to load_staging2.py: the table carries the same (symbol, trade_date)
+Companion to load_staging.py: the table carries the same (symbol, trade_date)
 primary key as price_history ("the original symbol_max table") and stores the
 per-row ratio close / open. One row per price_history row, nothing else — the
 table is meant to be joined to price_history on its primary key.
@@ -10,7 +10,7 @@ Self-contained: creates its own table (CREATE TABLE IF NOT EXISTS) and
 bulk-upserts (symbol, trade_date, close_open_ratio). Idempotent re-runs.
 
 Usage:
-    venv/bin/python load_close_open_ratio.py              # all data/staging2/*_max.csv
+    venv/bin/python load_close_open_ratio.py              # all data/staging/*_max.csv
     venv/bin/python load_close_open_ratio.py --max 5      # smoke test (first 5 files)
 """
 import argparse
@@ -28,7 +28,7 @@ TABLE = "close_open_ratio_chgpct"
 FILE_TIMEOUT = 120  # seconds
 
 # Drop ratios that would overflow DECIMAL(18,6) (~1e12) — the same 1264 class
-# of failure that rejected the 13 corrupt symbols in load_staging2.
+# of failure that rejected the 13 corrupt symbols in load_staging.py.
 RATIO_CEILING = 1e11
 
 DDL = f"""
@@ -143,9 +143,9 @@ def upsert_rows(columns, rows):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="compute close/open per row from data/staging2 CSVs "
+        description="compute close/open per row from data/staging CSVs "
                     "into close_open_ratio_chgpct")
-    parser.add_argument("--dir", default="data/staging2")
+    parser.add_argument("--dir", default="data/staging")
     parser.add_argument("--suffix", default="max")
     parser.add_argument("--max", type=int, default=0,
                         help="load at most N files (smoke test)")

@@ -1,12 +1,12 @@
-"""load_staging2.py — load the full-history CSV exports from data/staging2/
+"""load_staging.py — load the full-history CSV exports from data/staging/
 into MySQL.
 
-Companion to ingest_universe.py (CSV-only export): this reads every
-<SYMBOL>_max.csv in the staging2 directory and upserts it into
+Companion to ingest.py (CSV-only export): this reads every
+<SYMBOL>_max.csv in the staging directory and upserts it into
 instruments / price_history (idempotent) with an ingest_log row each.
 
 Deliberately simple: no network, no delay needed. Files are never moved or
-deleted — staging2 remains the export checkpoint.
+deleted — staging remains the export checkpoint.
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ REQUIRED = {"symbol", "trade_date", "close"}
 COLUMNS = ["symbol", "trade_date", "open", "high", "low", "close",
            "adj_close", "volume"]
 REJECTED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "data", "universe", "verified_rejected.csv")
+                             "data", "check_exist", "verified_rejected.csv")
 
 
 def ensure_rejected_file():
@@ -80,7 +80,8 @@ def load_file(path, symbol):
     try:
         db.insert_rows("instruments",
                        ["symbol", "asset_type", "last_sync"],
-                       [(symbol, "equity", pd.Timestamp.now().to_pydatetime())])
+                       [(symbol, "index" if symbol.startswith("^") else "equity",
+                         pd.Timestamp.now().to_pydatetime())])
         written = db.insert_rows("price_history", COLUMNS, rows)
         db.log_ingest("csv", symbol, os.path.basename(path), written, "ok")
         return True, written, None
@@ -91,8 +92,8 @@ def load_file(path, symbol):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="load data/staging2/ full-history CSVs into MySQL")
-    parser.add_argument("--dir", default="data/staging2")
+        description="load data/staging/ full-history CSVs into MySQL")
+    parser.add_argument("--dir", default="data/staging")
     parser.add_argument("--suffix", default="max",
                         help="filename suffix filter, e.g. max (default)")
     parser.add_argument("--max", type=int, default=0,

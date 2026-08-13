@@ -23,12 +23,15 @@ The platform ingests external market data through a yfinance API pipeline, store
                     yfinance API                     sampled snapshot
                         │                           for_train_y_2025_11_18sample.csv
                         ▼                                  │
-                ingest_api.py                        load_sampled.py
-              (requests/yfinance →          (self-contained: creates
-               pandas/numpy clean →         sampled_market_data, PK
-               staging CSV → insert)        symbol+date, upserts rows)
+                  ingest.py (CSV-only)                  load_sampled.py
+              (requests/yfinance →            (self-contained: creates
+               pandas/numpy clean →           sampled_market_data, PK
+               <SYM>_max.csv → staging)       symbol+date, upserts rows)
                         │                                  │
                         ▼                                  ▼
+         load_staging.py / load_close_open_ratio.py
+                        │
+                        ▼
               ┌────────────────────────────────────────────────────────────────────┐
               │              Storage Tier (MySQL, db.py)                          │
               │  instruments · price_history · ingest_log · sampled_market_data   │
@@ -87,16 +90,14 @@ midtermproject2/
 ├── schema.sql                # EMPTY placeholder — reserved for future MySQL DDL only
 ├── config.py                 # loads .env, single source of truth for all settings
 ├── db.py                     # pymysql connection + execute_schema() + query/insert helpers
-├── ingest_api.py             # yfinance → DataFrame → numpy cleaning → staging CSV → MySQL
-├── ingest_universe.py        # bulk full-history export (CSV-only, resumable) → data/staging2/ (§5.4)
+├── ingest.py                 # CSV-only bulk export (yfinance → clean → <SYM>_max.csv → data/staging/) (§5.1, §5.4)
 ├── load_sampled.py           # creates sampled_market_data (PK symbol+date) + upserts data/for_train_y_2025_11_18sample.csv (§5.3)
-├── load_staging2.py          # loads data/staging2/ CSVs → MySQL; failures → verified_rejected.csv (§5.4)
+├── load_staging.py           # loads data/staging/ CSVs → MySQL; failures → verified_rejected.csv (§5.4)
 ├── load_close_open_ratio.py  # creates close_open_ratio_chgpct (PK symbol+trade_date, close/open) from the same CSVs (§5.6)
-├── verify_tickers.py         # checks universe symbols against yfinance → verify_ok/bad.csv (§5.4)
+├── verify_tickers.py         # checks check_exist symbols against yfinance → verify_ok/bad.csv (§5.4)
 ├── logic_layer.py            # THE Logic Layer: registry + metrics + canonical envelopes
-├── app_presenter.py          # envelope → Plotly figure JSON (shared by both UIs)
 ├── app_flask.py              # Flask main app: server-rendered 3D page + GET /api/config
-├── app_streamlit.py          # Streamlit secondary page + "Return to Main Page" button
+├── app_streamlit.py          # Streamlit secondary page + envelope → Plotly figure (folded in from the former app_presenter.py; §7.3)
 ├── static/
 │   ├── index.html            # main page DOM (server-injected 3D figure)
 │   └── style.css             # layout, dark/light themes
@@ -105,9 +106,8 @@ midtermproject2/
 └── data/
     ├── for_train_y_2025_11_18sample.csv  # sampled snapshot dataset (§5.3)
     ├── sampled_184408.csv  # archived superseded snapshot (unreferenced)
-    ├── universe/             # tickerinventory.csv, verify_ok.csv, verify_bad.csv, verified_rejected.csv (§5.4)
-    ├── staging/              # ingest_api.py writes staged CSVs here
-    ├── staging2/             # ingest_universe.py export checkpoints (<SYM>_max.csv) (§5.4)
+    ├── check_exist/          # tickerinventory.csv, verify_ok.csv, verify_bad.csv, verified_rejected.csv, ingest_failures.csv (§5.4)
+    ├── staging/              # ingest.py export checkpoints (<SYM>_max.csv) (§5.4)
 ```
 
 ---
@@ -116,6 +116,11 @@ midtermproject2/
 
 `config.py` reads `.env` via `python-dotenv`. Every setting is defined there; code never hardcodes a host/port/db/url.
 
+> **Who may read `CFG`:** backend modules only (`db.py`, `logic_layer.py` — the loaders
+> read it transitively via `db`). The apps (`app_flask.py`, `app_streamlit.py`) never import
+> `config` directly; they get app-facing values through `logic_layer`'s whitelist accessors
+> `get_urls()` / `get_bind_host()` (DB credentials stay behind `db.py`).
+
 | Key | Default (in `.env.example`) | User-supplied |
 |---|---|---|
 | `DB_HOST` | `localhost` | — |
@@ -123,7 +128,6 @@ midtermproject2/
 | `DB_NAME` | `finance_app` | — |
 | `DB_USER` | *(empty)* | **yes** |
 | `DB_PASSWORD` | *(empty)* | **yes** |
-| `FTE_STAGING_DIR` | `data/staging` | — |
 | `FTE_UPLOAD_DIR` | `data/uploads` | — |
 | `FTE_PROCESSED_DIR` | `data/processed` | — |
 | `FTE_REJECTED_DIR` | `data/rejected` | — |
@@ -153,21 +157,28 @@ midtermproject2/
 
 ## 5. Data Ingestion
 
-### 5.1 API pipeline — `ingest_api.py`
+### 5.1 Ingest tool — `ingest.py` (CSV-only, merged)
 
-CLI: `python ingest_api.py --symbol AAPL --period 1y [--interval 1d]`
+`ingest.py` merges the former `ingest_api.py` (single-symbol) and
+`ingest_universe.py` (bulk) into one **CSV-only** exporter: it never touches
+MySQL — loading is the loaders' job (§5.4, §5.6). The single-symbol/`1y`
+interactive path is removed; the supported export is the bulk full-history
+run (`--period max` default), see §5.4.
 
-Process sequence (per the architecture description):
-1. Resolve config, connect `db.get_conn()`.
-2. Fetch OHLCV history from yfinance (`requests` under the hood). Symbol validity: empty response → log `error` (`invalid`), skip.
-3. Normalize into a pandas DataFrame; force numeric dtypes and parse dates.
-4. **numpy** cleaning pass: forward-fill/leave `NaN`s handled per column policy; drop fully-empty rows.
-5. Serialize the in-memory DataFrame to a localized staging CSV in `FTE_STAGING_DIR` (`<SYMBOL>_<period>.csv`).
-6. Ensure the symbol row exists in `instruments` (upsert) — **parent row first**, required by the `price_history → instruments` foreign key (inserting children first fails with MySQL error 1452).
-7. Bulk-insert the staging CSV into `price_history` on a short-lived connection (`db.insert_rows`), upsert semantics.
-8. Write one `ingest_log` row: source `api`, symbol, rows written, status, timestamps.
+CLI: `python ingest.py [--file data/check_exist/verify_ok.csv] [--period max]
+[--interval 1d] [--outdir data/staging] [--delay 1.0] [--max N]`
 
-Rate-limit handling: on yfinance failure, log and retry once with a short sleep; final failure → `ingest_log` row with status `error`.
+Process sequence:
+1. Fetch OHLCV history from yfinance (`requests` under the hood). A transient
+   failure is retried once (`[retry] ...`, 3s pause) before being recorded.
+2. Normalize into a pandas DataFrame; force numeric dtypes and parse dates.
+3. **numpy** cleaning pass: forward-fill, drop fully-empty rows.
+4. Serialize to `<SYMBOL>_<period>.csv` in `--outdir` (default
+   `data/staging`) — the file is the checkpoint (resume semantics §5.4).
+5. **Failure ledger:** every final download failure or empty-after-cleaning
+   result is appended to `data/check_exist/ingest_failures.csv` (header
+   `symbol,period,reason,ts`, append-only, best-effort) — the MySQL-free
+   audit trail replacing the former `ingest_log` `source=api` error rows.
 
 ### 5.3 Sampled snapshot loader — `load_sampled.py`
 
@@ -205,30 +216,31 @@ view now derives from the daily `Change` column at **query time** — the
 mirror table `change_y_binary` and its loader `load_change_y_binary.py`
 no longer exist (§5.5 removed, see §6.3).
 
-### 5.4 Bulk universe pipeline — `verify_tickers.py` / `ingest_universe.py` / `load_staging2.py`
+### 5.4 Bulk check_exist pipeline — `verify_tickers.py` / `ingest.py` / `load_staging.py`
 
 The checkpoint flow that built the full price-history dataset (12k+
 ticker inventory → 7,454 verified symbols → 7,240 exported CSVs):
 
 1. `verify_tickers.py` — serial existence check of
-   `data/universe/tickerinventory.csv` symbols against yfinance
-   (`get_history_metadata`); writes `data/universe/verify_ok.csv` /
+   `data/check_exist/tickerinventory.csv` symbols against yfinance
+   (`get_history_metadata`); writes `data/check_exist/verify_ok.csv` /
    `verify_bad.csv`, resumable (skips symbols already in either output).
-2. `ingest_universe.py` — **CSV-only bulk export**: fetches full history
+2. `ingest.py` — **CSV-only bulk export** (see §5.1): fetches full history
    (`--period max` default) for every `verify_ok.csv` symbol and writes one
-   `<SYMBOL>_max.csv` into `data/staging2/`. Never touches MySQL and never
-   reads/writes/deletes `data/staging/`. Serial, ~1 req/s (`--delay 1.0`),
-   resumable: existing files are skipped, the newest is re-run. The CSV
-   file is the checkpoint.
-3. `load_staging2.py` — loads every `<SYMBOL>_max.csv` from `data/staging2/`
+   `<SYMBOL>_max.csv` into `data/staging/`. Never touches MySQL. Serial,
+   ~1 req/s (`--delay 1.0`), resumable: existing files are skipped, the
+   newest is re-run. The CSV file is the checkpoint. Download-time failures
+   land in `data/check_exist/ingest_failures.csv` (§5.1).
+3. `load_staging.py` — loads every `<SYMBOL>_max.csv` from `data/staging/`
    into MySQL (local files only, no network): upserts the `instruments`
-   parent row first, bulk-upserts `price_history` (idempotent
+   parent row first (`asset_type` = `index` for `^`-prefixed symbols, else
+   `equity`), bulk-upserts `price_history` (idempotent
    `symbol`+`trade_date` PK), writes one `ingest_log` row per file. Files
    are never moved or deleted.
 
 **Rejected registry:** every failed symbol (unreadable/malformed CSV **or**
 DB error such as MySQL 1264 overflow / `-inf` values) is appended
-best-effort and deduped to `data/universe/verified_rejected.csv` (header
+best-effort and deduped to `data/check_exist/verified_rejected.csv` (header
 `symbol`) so failures can be reviewed without grepping logs. Current
 registry: 13 symbols.
 
@@ -245,7 +257,7 @@ and the `change_binary` metric (§6.3).
 
 ### 5.6 Close/Open ratio table — `load_close_open_ratio.py`
 
-CLI: `python load_close_open_ratio.py [--dir data/staging2] [--suffix max] [--max N]`
+CLI: `python load_close_open_ratio.py [--dir data/staging] [--suffix max] [--max N]`
 
 Self-contained loader (same pattern as §5.3) that creates the table
 `close_open_ratio_chgpct` in the same `finance_app` database — **no foreign
@@ -262,10 +274,10 @@ CREATE TABLE IF NOT EXISTS close_open_ratio_chgpct (
 ```
 
 1. PK `(symbol, trade_date)` is **identical to `price_history`** (the table
-   loaded from the `<SYM>_max.csv` staging2 exports) — the "via primary key"
+   loaded from the `<SYM>_max.csv` staging exports) — the "via primary key"
    connection: `JOIN ... ON p.symbol = r.symbol AND p.trade_date =
    r.trade_date`.
-2. Reads every `data/staging2/<SYM>_max.csv`, computes `close / open` per
+2. Reads every `data/staging/<SYM>_max.csv`, computes `close / open` per
    row, coerces numerics, parses `trade_date`.
 3. Sanitization: rows with `open` = 0 / NaN / non-finite, or a ratio whose
    magnitude would overflow `DECIMAL(18,6)` (~1e12), are skipped — this also
@@ -286,6 +298,7 @@ The **brain** of the system. It accepts a request, runs valid SQL/transforms, an
 - `registered_metrics: dict[str, callable]` — slug → metric function; holds exactly what the apps display (`history` + `market_3d`).
 - `handle_request(metric, params) -> envelope` — validates the slug, dispatches, catches exceptions into an error envelope (never raises to the UI).
 - A metric may return an optional 7th tuple element — a dict with `/meta` and/or `chart` keys merged into the envelope (used by `market_3d` for empty-state messages and full chart metadata).
+- Config whitelist accessors — `get_urls() -> {"main_url", "streamlit_url"}` and `get_bind_host() -> str` — the **only** way the apps read `config.py` (they never import it; §3).
 
 Metric functions are pure: `(params) -> DataFrame`. They query only via `db.query()` (parameterized SQL).
 
@@ -312,7 +325,7 @@ Metric functions are pure: `(params) -> DataFrame`. They query only via `db.quer
 ```
 
 Rules:
-- `chart.type` ∈ `line | bar | scatter | candlestick | table` (the types `app_presenter` implements) — plus `scatter3d` for `market_3d` and `change_binary`, rendered by `app_flask`.
+- `chart.type` ∈ `line | bar | scatter | candlestick | table` (the types `app_streamlit.envelope_to_figure` implements) — plus `scatter3d` for `market_3d` and `change_binary`, rendered by `app_flask`.
 - `market_3d`'s `chart` additionally carries the full column→channel mapping (`z`, `size`, `hover`, `color`) and visual knobs (`colorscale`, `colorbar_title`, `opacity`) so column-assignment changes happen only in the logic layer.
 - `rows` are JSON-safe lists aligned to `columns`.
 - Errors: `{"status": "error", "meta": {"errors": [...]}, "columns": [], "rows": []}`.
@@ -392,16 +405,16 @@ All math is plain SQL (window functions) + simple Python formatting. pandas is u
 Deliberately barebones: a fixed price-history view, no metric menu.
 
 - Symbol dropdown populated live from `instruments` via `logic_layer.symbol_list()` (`SELECT symbol FROM instruments ORDER BY symbol`) — only ingested symbols appear.
-- On load and on symbol change it auto-runs the `history` metric through `logic_layer.handle_request` (same envelope contract, no duplicated query logic) and renders the chart + data table via `app_presenter.envelope_to_figure`.
+- On load and on symbol change it auto-runs the `history` metric through `logic_layer.handle_request` (same envelope contract, no duplicated query logic) and renders the chart + data table via `envelope_to_figure` (defined in this file, §7.3).
 - Window radio: **Last 30 days (default)** / 60 / 90 / 365 / All — windowed choices pass `days=N` with `limit=0` (full window), All omits `days` (full history); no row-count toggle.
 - Data table headers are mapped to friendly names (`Trade Date`, `Open`, `High`, `Low`, `Close`, `Adj Close`, `Volume`).
-- Empty DB → inline hint to run `ingest_api.py --symbol AAPL --period 1y`; error envelope → `st.error`.
+- Empty DB → inline hint to run the ingest pipeline (`python ingest.py`, then `load_staging.py` / `load_close_open_ratio.py`); error envelope → `st.error`.
 - "**Return to Main Page**" button — hyperlink styled as a button pointing at `FTE_MAIN_URL`.
 
-### 7.3 `app_presenter.py` (shared)
+### 7.3 `envelope_to_figure` (in `app_streamlit.py`)
 
 - `envelope_to_figure(envelope) -> plotly Figure` — pure mapping from the canonical envelope to a Plotly figure (chart type → `go.Scatter`/`go.Bar`/`go.Candlestick`/`go.Table`).
-- Used by the Streamlit page directly. Flask does **not** share `envelope_to_figure`: its 3D chart is built server-side in `_chart_html` from the `market_3d` envelope's `chart` metadata.
+- Defined inside `app_streamlit.py` (folded in from the former `app_presenter.py`, whose only consumer this was). Flask does **not** use it: its 3D chart is built server-side in `_chart_html` from the `market_3d` envelope's `chart` metadata.
 - Because the envelope serializes numbers as strings (§6.2), the presenter coerces every numeric column back to real numbers and sets `autotypenumbers="convert types"` — otherwise `plotly_dark`'s strict type detection turns the y-axis into a categorical axis ordered by row order (values read top-to-bottom instead of low-to-high).
 
 ---
@@ -423,7 +436,7 @@ Deliberately barebones: a fixed price-history view, no metric menu.
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # then fill DB_USER / DB_PASSWORD
-python ingest_api.py --symbol AAPL --period 1y    # seed data
+python ingest.py --max 5                              # seed a few symbols (then load per §5.4)
 python app_flask.py                               # main page  :5000 (binds FTE_BIND_HOST)
 streamlit run app_streamlit.py                    # secondary :8501
 ```
@@ -443,7 +456,7 @@ database, the app user with grants, and all three tables. Then fill
 - All SQL parameterized (`db.query`) — never string-interpolated. SQL injection blocked.
 - Secrets only in `.env` (gitignored); nothing secret in code, logs, or repo.
 - No direct client-to-DB access; every read goes through the Logic Layer.
-- yfinance 429/rate-limit: caught, retried once, else logged to `ingest_log` as `error`.
+- yfinance 429/rate-limit: caught, retried once, else recorded in `data/check_exist/ingest_failures.csv` (MySQL-free ledger).
 - Unknown metric / bad params / empty results → error envelope (never a bare 500 or uncaught traceback).
 - Flask and Streamlit are stateless; no shared global state.
 
@@ -453,8 +466,8 @@ database, the app user with grants, and all three tables. Then fill
 
 | Stage | Test |
 |---|---|
-| Ingestion API | `ingest_api.py --symbol AAPL --period 1w` → staging CSV created; `ingest_log` has an `ok` row; rows visible in MySQL |
-| Invalid symbol | e.g. `ZZZZ.AA` → skipped, logged as `error`, no crash |
+| Ingest pipeline | `python ingest.py --max 2` → `data/staging/<SYM>_max.csv` written; `python load_staging.py --max 1` → `ingest_log` has a `csv` `ok` row; rows visible in MySQL |
+| Invalid symbol | e.g. `ZZZZ.AA` → `ERROR` printed, appended to `data/check_exist/ingest_failures.csv`, no crash |
 | Logic layer | Call `history` and `market_3d` via `handle_request`; assert `chart.type` valid, `columns` == `rows` width, non-empty |
 | **Column-mapping test** | Edit only `market_3d`'s `chart` dict (e.g. `z: close → adj_close`) → main page 3D chart reflects it with no app-file changes |
 | Flask main | `GET /` → 200, 3D chart renders, time-range select reloads `?days=N` |
@@ -514,7 +527,7 @@ Upserts use `INSERT ... ON DUPLICATE KEY UPDATE` (idempotent re-runs).
 
 - Producers: `logic_layer.handle_request(metric, params)` — called by `app_streamlit.py` (`history`) and `app_flask._chart_html` (`market_3d`, including the binary `change_bin` Z channel).
 - Envelope shape per §6.2. `chart.type` ∈ `line | bar | scatter | candlestick | table`, plus `scatter3d` for `market_3d` (and the retained `change_binary` metric), rendered by `app_flask`.
-- Consumers: `app_presenter.envelope_to_figure` (Streamlit) and `app_flask._chart_html` (main page 3D chart, binary included).
+- Consumers: `envelope_to_figure` in `app_streamlit.py` (Streamlit) and `app_flask._chart_html` (main page 3D chart, binary included).
 
 ---
 

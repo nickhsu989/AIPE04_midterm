@@ -16,7 +16,6 @@ CFG = {
     "DB_USER": os.getenv("DB_USER", ""),
     "DB_PASSWORD": os.getenv("DB_PASSWORD", ""),
     "FTE_BIND_HOST": os.getenv("FTE_BIND_HOST", "127.0.0.1"),
-    "FTE_STAGING_DIR": os.getenv("FTE_STAGING_DIR", "data/staging"),
     "FTE_UPLOAD_DIR": os.getenv("FTE_UPLOAD_DIR", "data/uploads"),
     "FTE_PROCESSED_DIR": os.getenv("FTE_PROCESSED_DIR", "data/processed"),
     "FTE_REJECTED_DIR": os.getenv("FTE_REJECTED_DIR", "data/rejected"),

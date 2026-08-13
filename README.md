@@ -7,25 +7,28 @@ platform. For the full architecture, see `docs/spec.md`.
 
 | Pipeline stage | State | Evidence |
 |---|---|---|
-| Symbol verification | DONE — `data/universe/verify_ok.csv` 7,454 / `data/universe/verify_bad.csv` 4,629 | `verify_tickers.py` |
-| Full-history export | DONE — 7,452 attempted, 7,240 `_max.csv` in `data/staging2/` (~212 "no data returned") | `data/staging2/` file count (run log not retained) |
+| Symbol verification | DONE — `data/check_exist/verify_ok.csv` 7,454 / `data/check_exist/verify_bad.csv` 4,629 | `verify_tickers.py` |
+| Full-history export | DONE — 7,452 attempted, 7,240 `_max.csv` in `data/staging/` (~212 "no data returned") | `data/staging/` file count + `data/check_exist/ingest_failures.csv` |
 | Load into MySQL (full pass) | DONE — 7,227 ok / 13 rejected | `logs/load2.log`: `DONE ok=7227 err=13 rows=32930670 of 7240` |
 | Load refresh re-run | CLOSED (2026-08-09 audit) — stopped deliberately at `BIRD` (~790/7,240 files, last_sync 18:08); the refresh was dropped: it reloads the same local CSVs (see "Resume actions") | `logs/load3.log` |
-| Rejected registry | DONE — 13 symbols in `data/universe/verified_rejected.csv`; `load_staging2.py` auto-appends failures (deduped) | file + §8 |
+| Rejected registry | DONE — 13 symbols in `data/check_exist/verified_rejected.csv`; `load_staging.py` auto-appends failures (deduped) | file + §8 |
 | Sampled snapshot load | DONE — 1,476,711 rows / 251 dates / 6,704 tickers into `sampled_market_data` (from `data/for_train_y_2025_11_18sample.csv`, keyed by ticker symbol) | `load_sampled.py` + §8 |
-| Close/Open ratio table | DONE — `close_open_ratio_chgpct` (PK `symbol`+`trade_date`, `close/open`) loaded from all 7,240 staging2 CSVs | `load_close_open_ratio.py` + §8 |
+| Close/Open ratio table | DONE — `close_open_ratio_chgpct` (PK `symbol`+`trade_date`, `close/open`) loaded from all 7,240 staging CSVs | `load_close_open_ratio.py` + §8 |
 
 DB totals: `instruments` 7,338 · `price_history` 32,934,291 rows · `ingest_log`
 15,346 ok / 220 error (api 7,251 ok / 205 err; csv 8,095 ok / 15 err — the 13
 rejected symbols are unique, rest are dev-phase probes) · `sampled_market_data`
 1,476,711 rows.
 
+(`ingest_log` `api` rows are historical — since the ingest merge, `ingest.py`
+is CSV-only and the loaders write `csv` rows.)
+
 **Resume playbook (next session):**
 
 1. Start the apps if they are down: `pgrep -af "app_flask|app_streamlit"`, then
    `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:5000/` and the
    same on :8501 — restart per §7 if down.
-2. Check the registry: `wc -l data/universe/verified_rejected.csv` must be 14 (header + 13
+2. Check the registry: `wc -l data/check_exist/verified_rejected.csv` must be 14 (header + 13
    symbols, no duplicates).
 3. No open items remain — the previous refresh/rejection items were closed by
    audit on 2026-08-09 (see "Resume actions" below).
@@ -33,11 +36,11 @@ rejected symbols are unique, rest are dev-phase probes) · `sampled_market_data`
 **Resume actions:**
 
 - Closed (2026-08-09, audit) — no longer on the list:
-  - Data refresh (`load_staging2.py` full re-run): dropped — it reloads the
+  - Data refresh (`load_staging.py` full re-run): dropped — it reloads the
     *same local CSVs* (no network, no new data); run-1 already covers all
     7,240 files (7,227 ok + 13 rejected). Only meaningful if
-    `ingest_universe.py` is re-exported first.
-  - Resume/skip logic in `load_staging2.py`: dropped — it existed only to
+    `ingest.py` is re-exported first.
+  - Resume/skip logic in `load_staging.py`: dropped — it existed only to
     speed up the refresh above; the loader is already idempotent (upsert).
   - Re-run `load_sampled.py` on an updated `data/sampled_184408.csv` with a
     `symbol` column: closed as superseded (2026-08-12) — the dataset swap
@@ -49,7 +52,7 @@ rejected symbols are unique, rest are dev-phase probes) · `sampled_market_data`
     vs. the `DECIMAL(18,6)` cap ~1e12; `adj_close` `-inf` / `-1e28`), the
     failure re-verified in `logs/load3.log`, and the symbols are micro-cap
     junk invisible on the decimated chart. The registry
-    (`data/universe/verified_rejected.csv`) is kept as the reviewable record.
+    (`data/check_exist/verified_rejected.csv`) is kept as the reviewable record.
 
 ---
 
@@ -71,9 +74,13 @@ it in MySQL, computes analytics in a single replaceable
 - **Dashboard** — Streamlit secondary page, linked from the main page
   (http://127.0.0.1:8501), with a "Return to Main Page" button
 
-Data flow: `ingest_api.py` / `load_sampled.py` → MySQL
+Data flow: `ingest.py` → `data/staging/` CSVs → `load_staging.py` /
+`load_close_open_ratio.py` / `load_sampled.py` → MySQL
 (`db.py`) → `logic_layer.py` (`history` + `market_3d` metrics) → Flask /
-Streamlit → browser.
+Streamlit → browser. Apps never import `config`/`db` directly — app-facing
+settings (`FTE_MAIN_URL`, `FTE_STREAMLIT_URL`, `FTE_BIND_HOST`) are read
+through `logic_layer.get_urls()` / `get_bind_host()`, and DB credentials stay
+behind `db.py`.
 
 ---
 
@@ -87,28 +94,25 @@ midtermproject2/
 ├── setup_finance_app.sql # one-time MySQL bootstrap: DB + user + tables
 ├── schema.sql            # EMPTY by design — future MySQL DDL lives here
 ├── verify_tickers.py     # checks tickerinventory.csv symbols against yfinance
-├── config.py             # loads .env → CFG dict
+├── config.py             # loads .env → CFG dict (backend-only; apps read it via logic_layer accessors)
 ├── db.py                 # MySQL connection + query/insert/schema helpers
-├── ingest_api.py         # yfinance → cleaning → staging CSV → MySQL
-├── ingest_universe.py    # bulk export: every data/universe/verify_ok.csv symbol, max history → data/staging2/
-├── load_staging2.py      # loads data/staging2/ CSVs into MySQL
+├── ingest.py             # CSV-only bulk export: every data/check_exist/verify_ok.csv symbol, max history → data/staging/
+├── load_staging.py       # loads data/staging/ CSVs into MySQL
 ├── load_sampled.py       # self-contained: creates sampled_market_data (PK symbol+date) + upserts data/for_train_y_2025_11_18sample.csv
-├── load_close_open_ratio.py # self-contained: creates close_open_ratio_chgpct (PK symbol+trade_date, close/open) from data/staging2/
+├── load_close_open_ratio.py # self-contained: creates close_open_ratio_chgpct (PK symbol+trade_date, close/open) from data/staging/
 ├── logic_layer.py        # THE logic layer: metric registry + envelopes
-├── app_presenter.py      # envelope → Plotly figure (shared)
 ├── app_flask.py          # Flask main app (server-rendered page + /api/config)
-├── app_streamlit.py      # Streamlit dashboard
+├── app_streamlit.py      # Streamlit dashboard + envelope → Plotly figure (was app_presenter.py)
 ├── static/
 │   ├── index.html        # main page DOM
 │   └── style.css         # layout + dark/light themes
 ├── docs/                 # spec + architecture docs
 ├── logs/                 # runtime logs (flask.log, streamlit.log, load2/load3.log)
 └── data/
-    ├── universe/         # tickerinventory.csv, verify_ok.csv, verify_bad.csv, verified_rejected.csv
+    ├── check_exist/      # tickerinventory.csv, verify_ok.csv, verify_bad.csv, verified_rejected.csv
     ├── for_train_y_2025_11_18sample.csv # sampled snapshot dataset (loaded by load_sampled.py)
     ├── sampled_184408.csv # archived superseded snapshot (unreferenced)
-    ├── staging/          # API ingestion staging CSVs
-    ├── staging2/         # full-history export checkpoints (<SYM>_max.csv)
+    ├── staging/          # ingest.py export checkpoints (<SYM>_max.csv)
 ```
 
 ---
@@ -147,7 +151,6 @@ cp .env.example .env
 | `DB_NAME` | `finance_app` | — |
 | `DB_USER` | *(blank)* | **fill** |
 | `DB_PASSWORD` | *(blank)* | **fill** |
-| `FTE_STAGING_DIR` | `data/staging` | — |
 | `FTE_UPLOAD_DIR` | `data/uploads` | — |
 | `FTE_PROCESSED_DIR` | `data/processed` | — |
 | `FTE_REJECTED_DIR` | `data/rejected` | — |
@@ -355,68 +358,55 @@ restart them interactively (no `nohup` needed).
 
 ## 8. Operating the data
 
-**API ingestion** (any valid yfinance symbol; indices use `^`, e.g. `^GSPC`):
+**Bulk export (full check_exist, CSV-only):**
+
+`ingest.py` (merged from the former `ingest_api.py` + `ingest_universe.py`) is a
+CSV-only export — it **never touches MySQL**; loading is
+`load_staging.py` / `load_close_open_ratio.py`'s job. It fetches each symbol's
+full history (`--period max`, default) and writes one CSV per symbol into
+`data/staging/`.
 
 ```bash
-python ingest_api.py --symbol AAPL --period 1y
-python ingest_api.py --symbol ^GSPC --period 1y
-```
-
-Result: staging CSV in `data/staging/`, rows in `price_history`, a log row in
-`ingest_log`. Re-running is idempotent (upsert). Invalid symbols are skipped
-and logged, never a crash.
-
-Expected console output (one line per symbol):
-
-```
-OK: AAPL -> 251 rows (staging: data/staging/AAPL_1y.csv)
-OK: ^GSPC -> 251 rows (staging: data/staging/^GSPC_1y.csv)
-```
-
-An invalid symbol prints `ERROR: no data returned (invalid symbol or empty
-range)` and logs an `ingest_log` row with status `error` — no crash.
-
-**Bulk export (full universe, CSV-only):**
-
-`ingest_universe.py` is a CSV-only export — it **never touches MySQL**. It
-fetches each symbol's full history (`--period max`, default) and writes one
-CSV per symbol into `data/staging2/`.
-
-```bash
-python ingest_universe.py                 # every symbol in data/universe/verify_ok.csv, max period
-python ingest_universe.py --period 5y     # shorter range if you prefer
-python ingest_universe.py --max 5         # smoke test: first 5 remaining symbols
+python ingest.py                 # every symbol in data/check_exist/verify_ok.csv, max period
+python ingest.py --period 5y     # shorter range if you prefer
+python ingest.py --max 5         # smoke test: first 5 remaining symbols
 ```
 
 Serial and rate-safe: one symbol at a time with a 1s delay (`--delay 1.0`,
 default) — ~1 req/s, well under Yahoo's rate cap. Each symbol's CSV in
-`data/staging2/` is written immediately and doubles as the checkpoint. Files in
-`data/staging/` are never read, written, or deleted.
+`data/staging/` is written immediately and doubles as the checkpoint. A
+transient download error is retried once (`[retry] ...`, 3s pause) before being
+recorded as a failure.
 
 Expected output (one line per symbol):
 
 ```
-OK: A -> 6716 rows (data/staging2/A_max.csv)
+OK: A -> 6716 rows (data/staging/A_max.csv)
 ```
 
 **Resume:** re-run the same command. Existing `<SYMBOL>_max.csv` files in
-`data/staging2/` are skipped (other periods/`data/staging` never count); the
-newest file is re-run to ensure it is complete. The full 7,400+-symbol run
-takes several hours — run it under `nohup`/tmux:
+`data/staging/` are skipped; the newest file is re-run to ensure it is
+complete. The full 7,400+-symbol run takes several hours — run it under
+`nohup`/tmux:
 
 ```bash
-nohup python ingest_universe.py > logs/seed2.log 2>&1 &
+nohup python ingest.py > logs/seed2.log 2>&1 &
 ```
 
-**Load staging2 exports into MySQL:**
+**Failure ledger:** every download-time failure (after the retry) or
+empty-after-cleaning is appended to `data/check_exist/ingest_failures.csv` (header
+`symbol,period,reason,ts`, append-only, best-effort) — a MySQL-free audit
+trail.
+
+**Load staging exports into MySQL:**
 
 Once the export above has finished, load the full-history CSVs into the
-database with `load_staging2.py` (local files only — no network, no delay
+database with `load_staging.py` (local files only — no network, no delay
 needed):
 
 ```bash
-python load_staging2.py --max 5          # smoke test: first 5 files
-python load_staging2.py                  # load all data/staging2/*_max.csv
+python load_staging.py --max 5          # smoke test: first 5 files
+python load_staging.py                  # load all data/staging/*_max.csv
 ```
 
 Per file: upserts `instruments` (parent first), bulk-upserts
@@ -424,14 +414,14 @@ Per file: upserts `instruments` (parent first), bulk-upserts
 `ingest_log` row. Files are never moved or deleted.
 
 Every failed symbol (unreadable/malformed CSV **or** DB error such as MySQL
-1264 overflow / `-inf` values) is appended to `data/universe/verified_rejected.csv`
+1264 overflow / `-inf` values) is appended to `data/check_exist/verified_rejected.csv`
 (header `symbol`, deduped, best-effort) so failures can be
 reviewed without relying on the log.
 
 Expected output (one line per file):
 
 ```
-OK: A -> 6716 rows (data/staging2/A_max.csv)
+OK: A -> 6716 rows (data/staging/A_max.csv)
 DONE ok=7240 err=0 rows=... of 7240
 ```
 
@@ -491,8 +481,8 @@ below).
 
 **Close/Open ratio table (`close_open_ratio_chgpct`):**
 
-`load_close_open_ratio.py` mirrors `load_staging2.py` in reverse: it reads
-every `data/staging2/<SYM>_max.csv` (the "symbol_max" exports), computes the
+`load_close_open_ratio.py` mirrors `load_staging.py` in reverse: it reads
+every `data/staging/<SYM>_max.csv` (the "symbol_max" exports), computes the
 per-row ratio `close / open`, and upserts it into `close_open_ratio_chgpct`
 (`CREATE TABLE IF NOT EXISTS`, DDL in the script). It carries the **same PK
 `(symbol, trade_date)`** as `price_history` — the intended access pattern is a
@@ -501,7 +491,7 @@ p.trade_date = r.trade_date`) — plus `INDEX idx_date (trade_date)`.
 
 ```bash
 python load_close_open_ratio.py --max 5          # smoke test: first 5 files
-python load_close_open_ratio.py                  # load all data/staging2/*_max.csv
+python load_close_open_ratio.py                  # load all data/staging/*_max.csv
 ```
 
 - Value stored raw as the ratio (`close/open`, `DECIMAL(18,6)`); rows with
@@ -515,7 +505,7 @@ python load_close_open_ratio.py                  # load all data/staging2/*_max.
 Expected output (one line per file):
 
 ```
-OK: A -> 6716 rows (data/staging2/A_max.csv)
+OK: A -> 6716 rows (data/staging/A_max.csv)
 DONE ok=7240 err=0 rows=... of 7240
 ```
 
@@ -613,11 +603,11 @@ it via `logic_layer.handle_request` — no app file changes.
 |---|---|
 | `Access denied for user 'root' (using password: YES)` | root uses `auth_socket` or wrong password → run `setup_finance_app.sql` (section 6) to create the dedicated app user and set it in `.env` |
 | `Table 'finance_app.price_history' doesn't exist` | tables not created → run `mysql -u root -p < setup_finance_app.sql` (section 6) |
-| Charts still using old code after an edit | Streamlit only hot-reloads the main script (`app_streamlit.py`); changes to imported modules (`logic_layer.py`, `app_presenter.py`, `db.py`) require restarting both servers |
+| Charts still using old code after an edit | Streamlit only hot-reloads the main script (`app_streamlit.py`); changes to imported modules (`logic_layer.py`, `db.py`) require restarting both servers |
 | `no data returned (invalid symbol or empty range)` | wrong/unlisted yfinance symbol → try `AAPL` or `^GSPC`; check with `period=5d` |
-| Charts empty on both pages | no data ingested → run `ingest_api.py --symbol AAPL --period 1y` first |
+| Charts empty on both pages | no data ingested → run `python ingest.py` then `python load_staging.py` (and `load_close_open_ratio.py`) per §8 |
 | `HTTP 404` on port 8501 | Streamlit not running → restart it per §7 (`streamlit run app_streamlit.py`) |
-| `429` rate-limit from yfinance | transient — the pipeline retries once and logs; wait and re-run |
+| `429` rate-limit from yfinance | transient — `ingest.py` retries once and records it in `data/check_exist/ingest_failures.csv`; wait and re-run |
 | Dashboard "Return to Main Page" dead | `FTE_MAIN_URL` mismatch or Flask not running on 5000 |
 | App dies when I close the SSH session | background jobs need `nohup` (or run under `tmux`/`screen`) — see §7 "Start the app over SSH" |
 | Sampled mode shows `ProgrammingError 1064` | server running an old `logic_layer.py` (reserved/digit-leading columns like `change`, `52w_*` must be backtick-quoted) → restart Flask |
@@ -628,15 +618,15 @@ it via `logic_layer.handle_request` — no app file changes.
 ## 12. Verification checklist
 
 ```bash
-python -c "import config, db, logic_layer, app_presenter, app_flask"   # no output = imports clean
+python -c "import config, db, logic_layer, app_flask"   # no output = imports clean
 python -c "import logic_layer; print(logic_layer.handle_request('history',   {'symbol':'AAPL','limit':0})['status'])"
 python -c "import logic_layer; print(logic_layer.handle_request('history',   {'symbol':'AAPL','days':30,'limit':0})['status'])"
 python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'days':90})['status'])"
 python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'days':90,'symbols':'AAPL,MSFT'})['status'])"
 python -c "import logic_layer; print(logic_layer.symbol_list())"        # e.g. ['AAPL', 'MSFT', ...]
 curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?days=90&symbols=AAPL"
-python ingest_api.py --symbol AAPL --period 5d                          # OK: AAPL -> N rows (staging: data/staging/AAPL_5d.csv)
-python load_staging2.py --max 5                                         # smoke load; failures auto-recorded to data/universe/verified_rejected.csv
+python ingest.py --max 2                                               # CSV-only smoke export -> data/staging/ (failures -> data/check_exist/ingest_failures.csv)
+python load_staging.py --max 5                                         # smoke load; failures auto-recorded to data/check_exist/verified_rejected.csv
 python load_sampled.py --max 5                                          # smoke load: first 5 rows -> sampled_market_data
 python load_close_open_ratio.py --max 5                                # smoke load: first 5 files -> close_open_ratio_chgpct
 python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'symbols':'A','z':'rsi_14'})['status'])"
@@ -648,7 +638,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&
 curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&days=30&z=change_bin&threshold=10"
 ```
 
-`data/universe/verified_rejected.csv` must contain exactly the header `symbol` plus the 13
+`data/check_exist/verified_rejected.csv` must contain exactly the header `symbol` plus the 13
 rejected symbols (`ADTX, CUBT, CYDX, DTII, NICH, NUWE, NXPL, PADEF, PBNNF,
 PPCB, PTPIF, SIGO, TOPS`) with no duplicates — and must not grow on a
 repeat load (dedupe check).

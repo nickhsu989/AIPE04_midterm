@@ -3,7 +3,9 @@
 Nodes are grouped by **category** (Apps · Loaders · Core · data/), mirroring the
 code-level relationships of the project.
 Solid arrows = direct import/usage (or file handoff). Dashed arrows = failure path / code reuse.
-Every script reads settings from `config.py` (loaded via `.env`) — one representative edge is shown.
+Backend scripts read settings from `config.py` (loaded via `.env`) — one representative edge is shown
+(`db --> cfg`); the apps reach `config` **only** through `logic_layer.get_urls()` /
+`get_bind_host()` (whitelist accessors — DB credentials never cross that boundary).
 Not shown: `venv/`, `__pycache__/` (no relationships), and the root-level non-code files
 `.env`, `.env.example`, `requirements.txt`, `.gitignore`.
 
@@ -12,8 +14,7 @@ flowchart TD
     subgraph APPS["Apps (presentation)"]
         direction LR
         fl["app_flask.py — main page :5000"]
-        sl["app_streamlit.py — dashboard :8501"]
-        pres["app_presenter.py — envelope → Plotly figure"]
+        sl["app_streamlit.py — dashboard :8501 + envelope → Plotly figure"]
         subgraph STATIC["static/ (served by Flask)"]
             idx["index.html"]
         end
@@ -21,9 +22,8 @@ flowchart TD
     subgraph LOADERS["Loaders (ingestion)"]
         direction LR
         v["verify_tickers.py"]
-        api["ingest_api.py — single-symbol API pipeline"]
-        u["ingest_universe.py — bulk CSV-only export"]
-        l2["load_staging2.py"]
+        ing["ingest.py — CSV-only bulk export"]
+        l2["load_staging.py"]
         lratio["load_close_open_ratio.py"]
         lsam["load_sampled.py"]
     end
@@ -38,42 +38,38 @@ flowchart TD
     subgraph DATA["data/"]
         direction LR
         smp["for_train_y_2025_11_18sample.csv"]
-        subgraph UNIV["universe/"]
+        subgraph CE["check_exist/"]
             ti["tickerinventory.csv"]
             vok["verify_ok.csv"]
             vbad["verify_bad.csv"]
             rej2["verified_rejected.csv"]
+            inf["ingest_failures.csv"]
         end
         subgraph STAG["staging/"]
-            stg["&lt;SYM&gt;_1y.csv"]
-        end
-        subgraph STAG2["staging2/"]
-            s2["&lt;SYM&gt;_max.csv (~7,240 exports)"]
+            s["&lt;SYM&gt;_max.csv (~7,240 exports)"]
         end
     end
     yf["yfinance API"]
     mysql[("MySQL finance_app: instruments · price_history · ingest_log · sampled_market_data · close_open_ratio_chgpct")]
 
     yf --> v
-    yf --> api
     smp --> lsam
     v --> vok
     v --> vbad
-    vok --> u
-    u --> s2
-    s2 --> l2
-    s2 --> lratio
+    vok --> ing
+    ing --> s
+    s --> l2
+    s --> lratio
     l2 -.-> rej2
-    u -.-> api
-    api --> stg
+    ing -.-> inf
     l2 --> db
     lratio --> db
     lsam --> db
-    api --> db
     db --> mysql
     setup -.-> mysql
     db -.-> sch
     db --> cfg
+    ll --> cfg
     ll --> db
     fl --> ll
     sl --> ll
@@ -86,17 +82,15 @@ flowchart TD
 | Category | Node | Role |
 |----------|------|------|
 | Apps | `app_flask.py` | Flask main page: 3D market chart, serves `static/index.html`, `/api/config` |
-| Apps | `app_streamlit.py` | Streamlit dashboard, reuses the same logic-layer metrics |
-| Apps | `app_presenter.py` | Shared helper: Logic Layer envelope → Plotly figure |
+| Apps | `app_streamlit.py` | Streamlit dashboard, reuses the same logic-layer metrics; owns `envelope_to_figure` (folded in from the former `app_presenter.py`) |
 | Apps | `static/index.html` | Flask template: symbol listbox, Z/Size/Color selects, threshold slider (server-gated — hidden unless Z = `change_bin`) |
 | Apps | `static/style.css` | Layout + dark/light themes; `.hidden` utility extended for the topbar label (`.topbar nav > label.hidden`) that gates slider visibility |
-| Loaders | `verify_tickers.py` | Existence check of universe symbols on yfinance → `data/universe/verify_ok.csv` / `verify_bad.csv` |
-| Loaders | `ingest_universe.py` | Bulk full-history export to `data/staging2/` (CSV-only, resumable) |
-| Loaders | `ingest_api.py` | Single-symbol yfinance pipeline (pandas + numpy cleaning → staging CSV → MySQL) |
-| Loaders | `load_staging2.py` | Loads `data/staging2/` CSVs into MySQL; failures → `data/universe/verified_rejected.csv` |
-| Loaders | `load_close_open_ratio.py` | Computes `close/open` per row from `data/staging2/` CSVs into `close_open_ratio_chgpct` (PK `(symbol, trade_date)`, joins to `price_history` by primary key) |
+| Loaders | `verify_tickers.py` | Existence check of check_exist symbols on yfinance → `data/check_exist/verify_ok.csv` / `verify_bad.csv` |
+| Loaders | `ingest.py` | CSV-only bulk export: yfinance → clean → `data/staging/<SYM>_max.csv` (resumable); download failures → `data/check_exist/ingest_failures.csv` |
+| Loaders | `load_staging.py` | Loads `data/staging/` CSVs into MySQL; failures → `data/check_exist/verified_rejected.csv` |
+| Loaders | `load_close_open_ratio.py` | Computes `close/open` per row from `data/staging/` CSVs into `close_open_ratio_chgpct` (PK `(symbol, trade_date)`, joins to `price_history` by primary key) |
 | Loaders | `load_sampled.py` | Self-contained loader: creates `sampled_market_data` (PK `(symbol, date)`) + upserts `data/for_train_y_2025_11_18sample.csv` |
-| Core | `logic_layer.py` | THE Logic Layer: metric registry, canonical envelopes (`history`, `market_3d`, `change_binary`) |
+| Core | `logic_layer.py` | THE Logic Layer: metric registry, canonical envelopes (`history`, `market_3d`, `change_binary`); exposes config whitelist accessors `get_urls()` / `get_bind_host()` to the apps |
 | Core | `db.py` | Centralized MySQL access (backend only; UIs never touch MySQL directly) |
 | Core | `config.py` | Single source of truth for settings (`.env`) |
 | Core | `schema.sql` | Empty DDL placeholder, executed by `db.execute_schema()` |
@@ -104,23 +98,20 @@ flowchart TD
 
 ## The ingestion pipelines
 
-**Pipeline A — bulk universe** (the checkpoint flow):
+**Pipeline A — bulk check_exist** (the checkpoint flow):
 
-`verify_tickers.py` → `data/universe/verify_ok.csv` → `ingest_universe.py` → `data/staging2/<SYM>_max.csv` → `load_staging2.py` → MySQL
+`verify_tickers.py` → `data/check_exist/verify_ok.csv` → `ingest.py` → `data/staging/<SYM>_max.csv` → `load_staging.py` → MySQL
 
-- `ingest_universe.py` reuses `clean()` / `fetch_history()` from `ingest_api.py`
+- `ingest.py` is CSV-only — it never touches MySQL (loading is `load_staging.py` / `load_close_open_ratio.py`'s job)
 - per-symbol CSV = the checkpoint (resume-safe, re-runs the newest file)
-- failed loads are recorded in `data/universe/verified_rejected.csv` (never deleted)
-- `data/staging2/<SYM>_max.csv` → `load_close_open_ratio.py` → MySQL
+- download-time failures are recorded in `data/check_exist/ingest_failures.csv` (append-only ledger)
+- failed loads are recorded in `data/check_exist/verified_rejected.csv` (never deleted)
+- `data/staging/<SYM>_max.csv` → `load_close_open_ratio.py` → MySQL
   `close_open_ratio_chgpct` (PK `(symbol, trade_date)`, same key shape as
   `price_history`; stores the per-row `close / open` ratio for a
   primary-key `JOIN` against `price_history`).
 
-**Pipeline B — on-demand / manual** (single feed into MySQL):
-
-- `ingest_api.py` → `data/staging/<SYM>.csv` → MySQL (single symbol, e.g. `--symbol AAPL --period 1y`)
-
-**Pipeline C — sampled snapshot** (standalone table, no foreign keys):
+**Pipeline B — sampled snapshot** (standalone table, no foreign keys):
 
 - `data/for_train_y_2025_11_18sample.csv` → `load_sampled.py` → MySQL
   `sampled_market_data`
@@ -132,9 +123,11 @@ flowchart TD
   `change_y_binary` mirror table and its loader were removed in the 2026-08-12
   dataset swap.
 
-Pipelines A and B upsert into `instruments` + `price_history` and write one
-`ingest_log` row per run, all via `db.py` (Pipeline C also writes one
-`ingest_log` row per run but targets only `sampled_market_data`).
+Pipeline A upserts into `instruments` + `price_history` and writes one
+`ingest_log` row per loaded CSV, all via `db.py` (Pipeline B writes one
+`ingest_log` row per run but targets only `sampled_market_data`). The former
+single-symbol `ingest_api.py` path (old Pipeline B, `data/staging/`) was
+removed in the ingest merge: `ingest.py` is the only ingest tool.
 
 ## MySQL schema — entity-relationship diagram
 
@@ -231,5 +224,7 @@ erDiagram
 - Full DDL for all five tables: `docs/spec.md` Appendix A.
 
 Notes:
-- `verify_tickers.py` and `app_presenter.py` are standalone — no imports from other project files.
-- UIs (Flask/Streamlit) are presentation-only; all SQL lives behind `logic_layer.py` / `db.py`.
+- `verify_tickers.py` is standalone — no imports from other project files.
+- UIs (Flask/Streamlit) are presentation-only: all SQL lives behind `logic_layer.py` / `db.py`,
+  and app-facing settings (`FTE_MAIN_URL`, `FTE_STREAMLIT_URL`, `FTE_BIND_HOST`) are read from
+  `config.py` only via `logic_layer`'s whitelist accessors — never imported directly.

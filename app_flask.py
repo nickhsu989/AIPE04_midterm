@@ -34,7 +34,6 @@ import plotly.express as px
 from flask import Flask, jsonify, request
 
 import logic_layer
-from config import CFG
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -292,11 +291,8 @@ def index():
 
 @app.route("/api/config")
 def api_config():
-    return jsonify({
-        "main_url": CFG["FTE_MAIN_URL"],
-        "streamlit_url": CFG["FTE_STREAMLIT_URL"],
-    })
+    return jsonify(logic_layer.get_urls())
 
 
 if __name__ == "__main__":
-    app.run(host=CFG["FTE_BIND_HOST"], port=5000, debug=False)
+    app.run(host=logic_layer.get_bind_host(), port=5000, debug=False)
