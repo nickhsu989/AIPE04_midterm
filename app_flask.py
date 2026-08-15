@@ -23,7 +23,7 @@ URL semantics:
     days absent        -> UI default: last 30 days (explicit days=30)
     days= (empty)      -> "All history": days param omitted to the metric
     days=30..365       -> trailing window
-    symbols absent     -> UI default: first symbol ticked (AAPL preferred)
+    symbols absent     -> UI default: first symbol ticked (AMD preferred)
     symbols=           -> nothing ticked (empty chart)
     symbols=A,B        -> only those symbols
     threshold=N        -> binary threshold (only used when z=change_bin)
@@ -247,7 +247,6 @@ def _chart_html(days, symbols, channels, threshold):
         x_max = float(df[chart["x"]].max())
         y_min = float(df[chart["y"]].min())
         z_ref = float(df[chart["z"]].min())
-        x_pad = max((x_max - x_min) * 0.1, 1.0)
         fig.update_layout(
             scene=dict(
                 xaxis_title=scene_titles["x"],
@@ -256,7 +255,13 @@ def _chart_html(days, symbols, channels, threshold):
                 annotations=[
                     dict(
                         text=scene_titles["z"],
-                        x=x_min - x_pad, y=y_min, z=z_ref,
+                        # Anchored exactly on the first date (no scene-bounds
+                        # stretch — gl3d bounds use only the x/y/z anchors),
+                        # with the text pushed into the left margin via
+                        # screen-space xshift: zero empty axis before the
+                        # first point.
+                        x=x_min, y=y_min, z=z_ref,
+                        xshift=-40,
                         showarrow=False, xanchor="right", yanchor="middle",
                         font=dict(size=13),
                     )
@@ -270,7 +275,7 @@ def _chart_html(days, symbols, channels, threshold):
                             # tuned to the 30-day sampled view; camera
                             # untouched by the fixed-stage engine, so it
                             # persists.
-                            center=dict(x=-0.12, y=0, z=0),
+                            center=dict(x=-0.12, y=-0.1, z=0),
                             projection=dict(type="orthographic")),
                 aspectmode="manual",
                 aspectratio=aspectratio,
@@ -299,7 +304,7 @@ def _binary_summary(meta):
 def index():
     days, symbols, symbols_explicit, threshold = _request_view()
     universe = logic_layer.symbol_list()
-    default_ticked = {"AAPL"} if "AAPL" in universe else ({universe[0]} if universe else set())
+    default_ticked = {"AMD"} if "AMD" in universe else ({universe[0]} if universe else set())
     if symbols is None:
         symbols = sorted(default_ticked)
     selected = set(symbols) if symbols_explicit else default_ticked

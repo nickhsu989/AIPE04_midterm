@@ -1,4 +1,10 @@
 /* style.css — layout, grid, dark/light themes (spec §8.2) */
+@font-face {
+  font-family: "Source Sans";
+  font-weight: 100 900;
+  font-style: normal;
+  src: url("/static/fonts/SourceSansVF-Upright.woff2") format("woff2");
+}
 :root {
   --bg: #ffffff;
   --fg: #1a1a2e;
@@ -46,7 +52,7 @@ body {
   background: var(--panel);
 }
 
-.topbar h1 { font-size: 2.2rem; font-weight: 700; line-height: 1.2; margin: 0; }
+.topbar h1 { font-family: "Source Sans", system-ui, sans-serif; font-size: 2.75rem; font-weight: 700; line-height: 1.2; margin: 0; }
 
 .topbar-head {
   display: flex;

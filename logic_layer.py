@@ -60,7 +60,7 @@ FIN_COLUMNS = (
     "perf_week", "rel_volume", "change",
 )
 UNIFIED_NUMERIC_COLUMNS = YF_COLUMNS + FIN_COLUMNS
-DEFAULT_CHANNELS = {"z": "prev_close", "size": "market_cap", "color": "perf_year"}
+DEFAULT_CHANNELS = {"z": "close", "size": "market_cap", "color": "perf_year"}
 
 # Binary Z channel: not a real column — a computed 0/1 flag
 # (change >= threshold) at query time, derived directly from
@@ -172,13 +172,25 @@ def _decimate(df, max_points):
 
 @register
 def history(params):
-    symbol = params.get("symbol", "AAPL").upper()
+    """2D history view for the Streamlit dashboard (:8501).
+
+    Returns the full unified row (trade_date + all UNIFIED_NUMERIC_COLUMNS),
+    so the :8501 data column dropdown can plot any dataset column — the
+    same dataset the :5000 3D cloud reads. `y` (optional) picks the
+    plotted column (validated against UNIFIED_NUMERIC_COLUMNS, default
+    "close") and becomes the chart's y channel.
+    """
+    symbol = params.get("symbol", "AMD").upper()
+    y = (params.get("y") or "").strip().lower()
+    if y not in UNIFIED_NUMERIC_COLUMNS:
+        y = "close"
     limit = int(params.get("limit", 250))
     lim_sql, lim_params = _limit_clause(limit)
     window_sql, window_params = _window_clause(symbol, params)
     df = pd.DataFrame(db.query(
         f"""
-        SELECT trade_date, open, high, low, close, adj_close, volume_yf
+        SELECT trade_date,
+               {", ".join(f"`{c}`" for c in UNIFIED_NUMERIC_COLUMNS)}
         FROM unified_market_data
         WHERE symbol = %s
         {window_sql}
@@ -188,7 +200,7 @@ def history(params):
         (symbol,) + window_params + lim_params,
     ))
     df = df.iloc[::-1].reset_index(drop=True)
-    return df, "history", "line", "trade_date", "close", symbol
+    return df, "history", "line", "trade_date", y, symbol
 
 
 @register
