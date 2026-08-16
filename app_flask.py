@@ -216,6 +216,11 @@ def _chart_html(days, symbols, channels, threshold):
         # Continuous color mapped here (not via px) — px's color= path is ~100x
         # slower at these point counts (25s+ for 20k rows).
         fig.data[0].marker.color = df[chart["color"]].to_numpy()
+        if chart["color"] == "change":
+            vmax = float(df["change"].abs().max())
+            if vmax > 0:
+                fig.data[0].marker.cmin = -vmax
+                fig.data[0].marker.cmax = vmax
         fig.data[0].marker.colorscale = chart.get("colorscale", "RdYlGn")
         fig.data[0].marker.showscale = True
         fig.data[0].marker.colorbar = dict(
