@@ -202,6 +202,8 @@ def _chart_html(days, symbols, channels, threshold):
                 type="linear", tickmode="array",
                 tickvals=tickvals, ticktext=ticktext,
             )
+        customdata_cols += [df[chart["size"]].tolist(), df[chart["color"]].tolist()]
+        customdata_cols.append(df["change"].tolist())
         fig = px.scatter_3d(
             df,
             x=chart["x"],
@@ -227,11 +229,14 @@ def _chart_html(days, symbols, channels, threshold):
         )
         # hover: original labels per point (x/y/z/channel values survive the
         # index conversion above)
-        fig.data[0].customdata = [[a, b, c] for a, b, c in zip(*customdata_cols)]
+        fig.data[0].customdata = [list(row) for row in zip(*customdata_cols)]
         fig.data[0].hovertemplate = (
             f"{scene_titles['x']}: %{{customdata[0]}}<br>"
             f"{scene_titles['y']}: %{{customdata[1]}}<br>"
-            f"{scene_titles['z']}: %{{customdata[2]}}<extra></extra>"
+            f"{scene_titles['z']}: %{{customdata[2]}}<br>"
+            f"Size ({_CHANNEL_LABELS.get(chart['size'], chart['size'])}): %{{customdata[3]}}<br>"
+            f"Color ({_CHANNEL_LABELS.get(chart['color'], chart['color'])}): %{{customdata[4]}}<br>"
+            f"Change (change-fin): %{{customdata[5]}}<extra></extra>"
         )
         scene = chart.get("scene") or {}
         # Sampled-style default box: the time axis (trade_date on x) is the

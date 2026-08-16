@@ -131,7 +131,7 @@ removed in the ingest merge: `ingest.py` is the only ingest tool.
 
 ## MySQL schema — entity-relationship diagram
 
-Five tables. Exactly one declared foreign key (`price_history.symbol →
+Six tables. Exactly one declared foreign key (`price_history.symbol →
 instruments.symbol`); the other cross-table relationships are
 **logical same-key-shape joins** (enforced in SQL by loaders/queries, not by
 DB constraints).
@@ -140,6 +140,8 @@ DB constraints).
 erDiagram
     INSTRUMENTS ||--o{ PRICE_HISTORY : "FK fk_px_symbol · ON DELETE CASCADE"
     PRICE_HISTORY ||--o| CLOSE_OPEN_RATIO_CHGPCT : "(symbol, trade_date) same key shape"
+    PRICE_HISTORY ||--o| UNIFIED_MARKET_DATA : "(symbol, trade_date) same key shape"
+    SAMPLED_MARKET_DATA ||--o| UNIFIED_MARKET_DATA : "(symbol, date→trade_date) key shape, inner join"
 
     INSTRUMENTS {
         varchar(16) symbol PK
@@ -186,6 +188,37 @@ erDiagram
         decimal change "decimal(18,6)"
     }
 
+    UNIFIED_MARKET_DATA {
+        varchar(16) symbol PK
+        date trade_date PK
+        decimal open "decimal(18,6)"
+        decimal high "decimal(18,6)"
+        decimal low "decimal(18,6)"
+        decimal close "decimal(18,6)"
+        decimal adj_close "decimal(18,6)"
+        bigint volume_yf
+        decimal market_cap "decimal(20,6)"
+        bigint _52w_low "52w_low · decimal(18,6)"
+        decimal prev_close "decimal(18,6)"
+        decimal price "decimal(18,6)"
+        bigint volume_fin
+        bigint _52w_high "52w_high · decimal(18,6)"
+        decimal perf_ytd "decimal(18,6)"
+        decimal perf_year "decimal(18,6)"
+        decimal sma200 "decimal(18,6)"
+        decimal perf_half_y "decimal(18,6)"
+        decimal avg_volume "decimal(18,6)"
+        decimal perf_quarter "decimal(18,6)"
+        decimal sma50 "decimal(18,6)"
+        decimal perf_month "decimal(18,6)"
+        decimal sma20 "decimal(18,6)"
+        decimal atr "decimal(18,6)"
+        decimal rsi_14 "decimal(18,6)"
+        decimal perf_week "decimal(18,6)"
+        decimal rel_volume "decimal(18,6)"
+        decimal change "decimal(18,6)"
+    }
+
     CLOSE_OPEN_RATIO_CHGPCT {
         varchar(16) symbol PK
         date trade_date PK
@@ -214,6 +247,11 @@ erDiagram
   - `sampled_market_data` is keyed by `(symbol, date)` — the binary `change_bin`
     flag is computed at query time from its own `change` column (the former
     `change_y_binary` mirror table was removed in the 2026-08-12 dataset swap).
+  - `unified_market_data` — the system's primary table, read by every
+    logic-layer metric: an inner join of `price_history` ×
+    `sampled_market_data` on `(symbol, date = trade_date)`, built by
+    `unify_databases.py`. Note `avg_volume` is `DECIMAL(18,6)` here (vs
+    `BIGINT` in `sampled_market_data`).
 - **`ingest_log`** — standalone audit table (auto-increment `id`); every
   loader writes one row per run; no foreign keys.
 - Attribute names rendered with a leading underscore (`_52w_low`,
@@ -221,7 +259,7 @@ erDiagram
   `52w_low` / `52w_high` — mermaid v11 cannot render attribute names that
   start with a digit; the real column name is shown in the attribute
   comment.
-- Full DDL for all five tables: `docs/spec.md` Appendix A.
+- Full DDL for all six tables: `docs/spec.md` Appendix A.
 
 Notes:
 - `verify_tickers.py` is standalone — no imports from other project files.

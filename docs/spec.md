@@ -517,6 +517,42 @@ CREATE TABLE IF NOT EXISTS ingest_log (
   started_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
   finished_at  DATETIME
 ) ENGINE=InnoDB;
+
+-- Primary table: built (not pasted) by unify_databases.py as an inner join
+-- of price_history x sampled_market_data on (symbol, date = trade_date);
+-- every logic-layer metric reads this table.
+CREATE TABLE IF NOT EXISTS unified_market_data (
+  `symbol`      VARCHAR(16) NOT NULL,
+  `trade_date`  DATE NOT NULL,
+  `open`        DECIMAL(18,6),
+  `high`        DECIMAL(18,6),
+  `low`         DECIMAL(18,6),
+  `close`       DECIMAL(18,6),
+  `adj_close`   DECIMAL(18,6),
+  `volume_yf`   BIGINT,
+  `market_cap`  DECIMAL(20,6),
+  `52w_low`     DECIMAL(18,6),
+  `prev_close`  DECIMAL(18,6),
+  `price`       DECIMAL(18,6),
+  `volume_fin`  BIGINT,
+  `52w_high`    DECIMAL(18,6),
+  `perf_ytd`    DECIMAL(18,6),
+  `perf_year`   DECIMAL(18,6),
+  `sma200`      DECIMAL(18,6),
+  `perf_half_y` DECIMAL(18,6),
+  `avg_volume`  DECIMAL(18,6),
+  `perf_quarter` DECIMAL(18,6),
+  `sma50`       DECIMAL(18,6),
+  `perf_month`  DECIMAL(18,6),
+  `sma20`       DECIMAL(18,6),
+  `atr`         DECIMAL(18,6),
+  `rsi_14`      DECIMAL(18,6),
+  `perf_week`   DECIMAL(18,6),
+  `rel_volume`  DECIMAL(18,6),
+  `change`      DECIMAL(18,6),
+  PRIMARY KEY (`symbol`, `trade_date`),
+  INDEX idx_date (`trade_date`)
+) ENGINE=InnoDB;
 ```
 
 Upserts use `INSERT ... ON DUPLICATE KEY UPDATE` (idempotent re-runs).
