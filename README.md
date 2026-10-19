@@ -158,9 +158,14 @@ cp .env.example .env
 | `FTE_BIND_HOST` | `127.0.0.1` (config.py default) | set `0.0.0.0` for LAN access — the shipped `.env.example` already ships `0.0.0.0` |
 | `FTE_MAIN_URL` | `http://127.0.0.1:5000` | — |
 | `FTE_STREAMLIT_URL` | `http://127.0.0.1:8501` | — |
+| `FTE_FAST_LOAD` | `0` | set `1` to let the loaders use `LOAD DATA LOCAL INFILE` (see §8) |
 
 Do not put quotes around values; avoid `#` and spaces in the password.
 Never commit `.env` (it is gitignored).
+
+`.env` is read from the project directory, not the shell's current
+directory, so every script behaves the same no matter where it is started
+from.
 
 ---
 
@@ -179,8 +184,10 @@ mysql -u root -p < setup_finance_app.sql
 What it creates:
 
 - database `finance_app` (utf8mb4)
-- MySQL user `user`@`localhost` (password `user`) with all privileges on
-  `finance_app.*`
+- MySQL users `user`@`localhost` **and** `user`@`127.0.0.1` (password `user`)
+  with all privileges on `finance_app.*` — two accounts because a server
+  started with `skip_name_resolve=ON` never matches a `localhost` grant for
+  a TCP connection coming from `127.0.0.1`
 - tables `instruments`, `price_history`, `ingest_log` (DDL per `docs/spec.md`
   Appendix A)
 
@@ -206,6 +213,27 @@ python -c "import db; print(db.query('SELECT 1 AS ok'))"
 ```
 
 Expected: `[{'ok': 1}]`.
+
+### macOS (Homebrew MySQL)
+
+The same script works on macOS; only the way you reach `root` differs —
+Homebrew's server has no root password, Linux packages often use
+`auth_socket`:
+
+```bash
+brew install mysql
+brew services start mysql          # stop with: brew services stop mysql
+mysql -u root < setup_finance_app.sql
+```
+
+If you see `Access denied for user 'root' (using password: YES)` on Linux,
+do **not** keep retrying root — run the script above to create the
+dedicated `user` account instead.
+
+Linux and macOS behave identically from here on: the loaders use plain
+`os.path` paths, every text file is opened with an explicit UTF-8 encoding
+and fixed line endings, and `.env` is resolved relative to the project
+directory, so a script started from anywhere finds the same files.
 
 `schema.sql` remains an **empty placeholder** reserved for future MySQL DDL
 (spec Rule 2); once populated it can be applied with
@@ -412,7 +440,51 @@ python load_staging.py                  # load all data/staging/*_max.csv
 
 Per file: upserts `instruments` (parent first), bulk-upserts
 `price_history` (idempotent `symbol`+`trade_date` PK), and writes an
-`ingest_log` row. Files are never moved or deleted.
+`ingest_log` row. Files are never moved or deleted. All three loaders share
+**one connection per run** (`db.loader_conn()`) instead of opening two or
+three per file — each new connection costs a TLS handshake (~12 ms on
+localhost), which is pure overhead at 7,000+ files.
+
+**Bulk-load fast path (`FTE_FAST_LOAD`):** every loader writes through
+`db.insert_rows`, which has two interchangeable paths:
+
+| Path | When | How |
+|---|---|---|
+| row-wise (default) | always available | one parameterized `INSERT ... ON DUPLICATE KEY UPDATE`; pymysql merges rows into multi-value statements |
+| fast | `FTE_FAST_LOAD=1` **and** batches ≥ 2,000 rows **and** the server allows it | `LOAD DATA LOCAL INFILE` into a temporary staging table, then one server-side upsert |
+
+Both paths have identical `ON DUPLICATE KEY UPDATE` semantics and produce
+byte-identical rows (verified by checksums), so enabling the fast path never
+changes the data — only the speed. Measured on macOS + Homebrew MySQL 26.7
+(Apple Silicon, 100 staging files / 975,939 rows and a 626 MB / 1,681,450-row
+snapshot):
+
+| Workload | row-wise | fast | speedup |
+|---|---|---|---|
+| `load_staging.py` (100 files, 975,939 rows) | 13.06 s | 10.52 s | **1.24x** |
+| `load_close_open_ratio.py` (100 files, 975,939 rows) | 6.11 s | 5.88 s | **1.04x** |
+| `load_sampled.py` (626 MB, 1,681,450 rows) | 53.84 s | 34.95 s | **1.54x** |
+| all three | 73.01 s | 51.35 s | **1.42x** |
+
+The gain scales with how much data each batch actually moves: the small
+per-file upserts (`instruments`, `ingest_log`) are unchanged, while
+`load_sampled.py` — one 1.68 M-row bulk — gains the most. Re-running either
+path leaves every table's `CHECKSUM TABLE` value byte-identical.
+
+To enable it, allow the command on the server once (needs admin):
+
+```sql
+SET GLOBAL local_infile = 1;      -- add local_infile=1 to my.cnf to make it stick
+```
+
+then set `FTE_FAST_LOAD=1` in `.env`. If the server refuses (`local_infile`
+is `OFF`), the loader prints **one** warning and continues on the portable
+row-wise path — a missing server setting never fails a run:
+
+```
+[db] fast load unavailable, falling back to row-wise upserts
+      (OperationalError: (3948, 'Loading local data is disabled; ...'))
+```
 
 Every failed symbol (unreadable/malformed CSV **or** DB error such as MySQL
 1264 overflow / `-inf` values) is appended to `data/check_exist/verified_rejected.csv`
@@ -538,43 +610,31 @@ Registered metrics (exactly what the apps display):
 
 | Metric | Used by |
 |---|---|
-| `history` | Streamlit dashboard (fixed price-history view) |
-| `market_3d` | Flask main page 3D chart (internal — not user-selectable); `source=sampled` Z channel `change_bin` is the binary 0/1 view (`change >= threshold -> 1 / else 0` computed at query time from the `threshold` param, ≥ 0) |
+| `history` | Streamlit dashboard (fixed price-history view over the unified dataset) |
+| `market_3d` | Flask main page 3D chart (internal — not user-selectable); Z channel `change_bin` is the binary 0/1 view (`change >= threshold -> 1 / else 0` computed at query time from the `threshold` param, ≥ 0) |
 | `change_binary` | standalone metric retained for direct calls — `change >= threshold -> 1 / else 0` at query time from the `threshold` param (≥ 0); the main page shows the same via `market_3d`'s `change_bin` Z channel |
 
-The main page 3D chart has **fixed channels**: X = `symbol`, Y =
-`trade_date`, hover = `symbol`. Z/Size/Color are user-selectable dropdowns
-sent as `z/size/color` query params and validated against `NUMERIC_COLUMNS`
-(bad or missing values fall back to the defaults: Z = `close`, Size =
-`volume`, Color = `adj_close`). The time range dropdown maps to an
-**absence-based** `days` param: the UI always sends an explicit `30`
-(default) /60/90/180/365, and "All history" sends `days=` (empty) so the
-metric applies no window. The symbol listbox ticks/unticks symbols via the
-`symbols` param (`symbols=` = none ticked, empty chart).
+All three metrics read the single **unified** table `unified_market_data`
+(built by `unify_databases.py` — the inner join of `price_history` ×
+`sampled_market_data` on `(symbol, trade_date)`). The former two-source
+toggle ("Connected MySQL" / "Sampled dataset", `?source=`) has been
+removed; the channel dropdowns now label each column's provenance with a
+`-yf` (yfinance / `price_history`) or `-fin` (snapshot /
+`sampled_market_data`) suffix instead.
 
-**Data source toggle** (`source` query param): the main page's "Data
-source" dropdown switches which table `market_3d` reads.
+The main page 3D chart has **fixed channels**: X = `trade_date`, Z
+(depth) = `symbol`, hover = `symbol`. The Y axis is the user-selectable
+Z-channel dropdown (`z`), plus `size` / `color` dropdowns, all validated
+against `UNIFIED_NUMERIC_COLUMNS` (bad or missing values fall back to the
+defaults: Z = `close`, Size = `market_cap`, Color = `perf_year`). The time
+range dropdown maps to an **absence-based** `days` param: the UI always
+sends an explicit `30` (default) /60/90/180/365, and "All history" sends
+`days=` (empty) so the metric applies no window. The symbol listbox
+ticks/unticks symbols via the `symbols` param (`symbols=` = none ticked,
+empty chart) and is populated from `logic_layer.symbol_list()`.
 
-- `source=sampled` (default) — `sampled_market_data`: x = `date`, y = the
-  selectable channel (default `change_bin`), z = `symbol` (depth),
-  channels from `SAMPLED_NUMERIC_COLUMNS` (market_cap, price, rsi_14,
-  change, …) with defaults Y = `change_bin`, Size = `market_cap`, Color = `perf_year`;
-  the Size dropdown offers only `SAMPLED_SIZE_COLUMNS` (price/volume
-  family — always non-negative: market_cap, volume, avg_volume,
-  prev_close, price, 52w_low, 52w_high, atr, rsi_14) and the Color
-  dropdown only `SAMPLED_COLOR_COLUMNS` (perf/sma family:
-  perf_ytd…perf_year, sma20/50/200, rel_volume, change);
-  the Z dropdown additionally offers the computed binary channel
-  `change_bin` (`SAMPLED_CHANNEL_COLUMNS`); the symbol listbox lists
-  ticker symbols (`symbol_list("sampled")`), `symbols=A` filters one
-  ticker, and `days` windows off `MAX(date)` from the sampled table.
-- `source=connected` — existing behavior: `price_history`, x = `symbol`,
-  y = `trade_date`, channels from `NUMERIC_COLUMNS`, symbol listbox from
-  `instruments` (`symbol_list("connected")`).
-
-The channel dropdown options are rendered per source by `app_flask.py`
-(`_channel_options`), and the rendered-chart cache key includes `source`
-and `threshold`.
+The channel dropdown options are rendered by `app_flask.py`
+(`_channel_options`), and the rendered-chart cache key includes `threshold`.
 
 To change which view is default, the window options, or the channel
 defaults:
@@ -612,7 +672,9 @@ it via `logic_layer.handle_request` — no app file changes.
 | Dashboard "Return to Main Page" dead | `FTE_MAIN_URL` mismatch or Flask not running on 5000 |
 | App dies when I close the SSH session | background jobs need `nohup` (or run under `tmux`/`screen`) — see §7 "Start the app over SSH" |
 | Sampled mode shows `ProgrammingError 1064` | server running an old `logic_layer.py` (reserved/digit-leading columns like `change`, `52w_*` must be backtick-quoted) → restart Flask |
-| Threshold (%) slider always visible even when Z ≠ `change_bin` | CSS specificity regression — `.topbar nav > label { display: flex }` overrides `.hidden`; keep `.topbar nav > label.hidden { display: none }` in `static/style.css` (the slider only shows when the sampled Z channel is `change_bin`) |
+| `[db] fast load unavailable, falling back to row-wise upserts` | informational, not an error: the server has `local_infile = OFF`, so `FTE_FAST_LOAD=1` silently uses the portable path. To actually get the fast path: `SET GLOBAL local_infile = 1;` (§8) |
+| Threshold (%) slider always visible even when Z ≠ `change_bin` | CSS specificity regression — `.topbar nav > label { display: flex }` overrides `.hidden`; keep `.topbar nav > label.hidden { display: none }` in `static/style.css` (the slider only shows when the Z channel is `change_bin`) |
+| A script "can't find" `data/...` or `.env` | none any more — both resolve against the project directory; if you really see this, an absolute path in `.env` points elsewhere |
 
 ---
 
@@ -630,13 +692,15 @@ python ingest.py --max 2                                               # CSV-onl
 python load_staging.py --max 5                                         # smoke load; failures auto-recorded to data/check_exist/verified_rejected.csv
 python load_sampled.py --max 5                                          # smoke load: first 5 rows -> sampled_market_data
 python load_close_open_ratio.py --max 5                                # smoke load: first 5 files -> close_open_ratio_chgpct
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'symbols':'A','z':'rsi_14'})['status'])"
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_bin','threshold':0})['status'])"
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_bin','threshold':10})['status'])"
-python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'source':'sampled','days':30,'z':'change_bin','threshold':-5})['status'])"   # negative -> falls back to 0
-python -c "import logic_layer; print(logic_layer.symbol_list('sampled'))"  # e.g. ['A', 'AA', 'AACB', ...] ticker symbols
-curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&days=30&symbols=A"
-curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?source=sampled&days=30&z=change_bin&threshold=10"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'days':30,'symbols':'A','z':'rsi_14'})['status'])"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'days':30,'z':'change_bin','threshold':0})['status'])"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'days':30,'z':'change_bin','threshold':10})['status'])"
+python -c "import logic_layer; print(logic_layer.handle_request('market_3d', {'days':30,'z':'change_bin','threshold':-5})['status'])"   # negative -> falls back to 0
+python -c "import logic_layer; print(logic_layer.handle_request('nope', {})['status'])"                            # unknown metric -> error envelope, never raises
+python -c "import logic_layer; print(logic_layer.symbol_list())"            # e.g. ['AAPL', 'MSFT', ...] — unified dataset
+curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?days=30&symbols=A"
+curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:5000/?days=30&z=change_bin&threshold=10"
+python unify_databases.py                                                   # price_history x sampled_market_data -> unified_market_data
 ```
 
 `data/check_exist/verified_rejected.csv` must contain exactly the header `symbol` plus the 13

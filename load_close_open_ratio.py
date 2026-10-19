@@ -67,19 +67,21 @@ def _watchdog(seconds):
     signal.alarm(seconds)
 
 
-def process_file(path):
+def process_file(path, conn=None):
     """Read one <SYM>_max.csv, compute close/open, upsert into MySQL.
 
     A per-file watchdog (FILE_TIMEOUT seconds) interrupts any pathological
     stall (parse or DB) so the bulk run never freezes on one file — the
     stalled file is returned as an error and the run continues.
 
+    `conn` is the run's shared connection (reused across files).
+
     Returns (symbol, rows_loaded, error_or_None).
     """
     symbol = os.path.basename(path).split("_")[0]
     _watchdog(FILE_TIMEOUT)
     try:
-        return _process_file(path, symbol)
+        return _process_file(path, symbol, conn=conn)
     except _Timeout:
         return symbol, 0, f"timed out after {FILE_TIMEOUT}s (watchdog)"
     except Exception as exc:  # noqa: BLE001
@@ -88,7 +90,7 @@ def process_file(path):
         signal.alarm(0)
 
 
-def _process_file(path, symbol):
+def _process_file(path, symbol, conn=None):
     try:
         df = pd.read_csv(path)
     except Exception as exc:  # noqa: BLE001
@@ -113,32 +115,19 @@ def _process_file(path, symbol):
     columns = ["symbol", "trade_date", "close_open_ratio"]
     rows = [tuple(r) for r in df[columns].itertuples(index=False, name=None)]
     try:
-        written = upsert_rows(columns, rows)
+        written = upsert_rows(columns, rows, conn=conn)
         return symbol, written, None
     except Exception as exc:  # noqa: BLE001
         return symbol, 0, f"{type(exc).__name__}: {exc}"
 
 
-def upsert_rows(columns, rows):
-    """Bulk upsert on the (symbol, trade_date) primary key."""
-    if not rows:
-        return 0
-    quoted = [f"`{c}`" for c in columns]
-    placeholders = ", ".join(["%s"] * len(columns))
-    updates = ", ".join(f"{c} = VALUES({c})" for c in quoted)
-    sql = f"INSERT INTO {TABLE} ({', '.join(quoted)}) VALUES ({placeholders}) " \
-          f"ON DUPLICATE KEY UPDATE {updates}"
-    conn = db.get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.executemany(sql, rows)
-        conn.commit()
-        return len(rows)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+def upsert_rows(columns, rows, conn=None):
+    """Bulk upsert on the (symbol, trade_date) primary key.
+
+    Delegates to db.insert_rows so the loader automatically uses the fast
+    bulk path (FTE_FAST_LOAD=1) when it is enabled and available.
+    """
+    return db.insert_rows(TABLE, columns, rows, conn=conn)
 
 
 def main():
@@ -159,18 +148,22 @@ def main():
     ensure_table()
 
     ok = err = rows = 0
-    for fname in files:
-        path = os.path.join(args.dir, fname)
-        symbol, written, error = process_file(path)
-        if error:
-            db.log_ingest("csv", symbol, error, 0, "error")
-            print(f"ERROR: {symbol} -> {error}", flush=True)
-            err += 1
-        else:
-            db.log_ingest("csv", symbol, fname, written, "ok")
-            print(f"OK: {symbol} -> {written} rows ({path})", flush=True)
-            ok += 1
-            rows += written
+    conn = db.loader_conn()
+    try:
+        for fname in files:
+            path = os.path.join(args.dir, fname)
+            symbol, written, error = process_file(path, conn=conn)
+            if error:
+                db.log_ingest("csv", symbol, error, 0, "error", conn=conn)
+                print(f"ERROR: {symbol} -> {error}", flush=True)
+                err += 1
+            else:
+                db.log_ingest("csv", symbol, fname, written, "ok", conn=conn)
+                print(f"OK: {symbol} -> {written} rows ({path})", flush=True)
+                ok += 1
+                rows += written
+    finally:
+        conn.close()
 
     print(f"DONE ok={ok} err={err} rows={rows} of {len(files)}", flush=True)
     return 1 if err else 0

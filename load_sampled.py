@@ -158,8 +158,10 @@ def _clean(value):
     return value
 
 
-def load_file(path, max_rows=0):
+def load_file(path, max_rows=0, conn=None):
     """Read the sampled CSV in chunks, map columns, upsert into MySQL.
+
+    `conn` is the run's shared connection (reused across chunks).
 
     Returns (rows_loaded, symbols, error_or_None).
     """
@@ -182,7 +184,7 @@ def load_file(path, max_rows=0):
             rows = [tuple(_clean(v) for v in r)
                     for r in df[columns].itertuples(index=False, name=None)]
             try:
-                written += upsert_rows(columns, rows)
+                written += upsert_rows(columns, rows, conn=conn)
             except Exception as exc:  # noqa: BLE001
                 return written, symbols, f"{type(exc).__name__}: {exc}"
             symbols += int(df["symbol"].notna().sum())
@@ -191,26 +193,13 @@ def load_file(path, max_rows=0):
         return written, symbols, f"unreadable csv: {type(exc).__name__}: {exc}"
 
 
-def upsert_rows(columns, rows):
-    """Bulk upsert covering every column (idempotent re-runs)."""
-    if not rows:
-        return 0
-    quoted = [f"`{c}`" for c in columns]
-    placeholders = ", ".join(["%s"] * len(columns))
-    updates = ", ".join(f"{c} = VALUES({c})" for c in quoted)
-    sql = f"INSERT INTO {TABLE} ({', '.join(quoted)}) VALUES ({placeholders}) " \
-          f"ON DUPLICATE KEY UPDATE {updates}"
-    conn = db.get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.executemany(sql, rows)
-        conn.commit()
-        return len(rows)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+def upsert_rows(columns, rows, conn=None):
+    """Bulk upsert covering every column (idempotent re-runs).
+
+    Delegates to db.insert_rows so the loader automatically uses the fast
+    bulk path (FTE_FAST_LOAD=1) when it is enabled and available.
+    """
+    return db.insert_rows(TABLE, columns, rows, conn=conn)
 
 
 def main():
@@ -223,7 +212,11 @@ def main():
 
     ensure_table()
     source_name = ingest_log_label(args.file)
-    written, symbols, error = load_file(args.file, args.max)
+    conn = db.loader_conn()
+    try:
+        written, symbols, error = load_file(args.file, args.max, conn=conn)
+    finally:
+        conn.close()
     if error:
         db.log_ingest("csv", source_name, error, 0, "error")
         print(f"ERROR: {error}", flush=True)

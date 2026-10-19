@@ -1,10 +1,13 @@
-numpy
-pandas
-pymysql
-flask
-streamlit
-plotly
-requests
-beautifulsoup4
-yfinance
-python-dotenv
+# Direct dependencies, pinned to the versions this build was verified with
+# (macOS + Homebrew MySQL 26.7, Python 3.12). Reproducible installs: the
+# loaders, the logic layer and both UIs behave identically on these versions.
+numpy==2.5.4
+pandas==3.0.6
+pymysql==1.2.3
+flask==3.1.3
+streamlit==1.66.0
+plotly==7.1.0
+requests==2.34.2
+beautifulsoup4==4.15.0
+yfinance==1.7.0
+python-dotenv==1.2.4

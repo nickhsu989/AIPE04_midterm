@@ -45,7 +45,8 @@ def main():
         return
 
     n_ok = n_bad = 0
-    with open(OUT_OK, "a") as f_ok, open(OUT_BAD, "a") as f_bad:
+    with open(OUT_OK, "a", encoding="utf-8", newline="") as f_ok, \
+            open(OUT_BAD, "a", encoding="utf-8", newline="") as f_bad:
         if os.path.getsize(OUT_OK) == 0:
             f_ok.write("symbol\n")
         if os.path.getsize(OUT_BAD) == 0:
