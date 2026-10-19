@@ -25,7 +25,7 @@ REJECTED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 def ensure_rejected_file():
     """Create verified_rejected.csv with its header when absent/empty."""
     if not os.path.exists(REJECTED_FILE) or os.path.getsize(REJECTED_FILE) == 0:
-        with open(REJECTED_FILE, "w", newline="") as fh:
+        with open(REJECTED_FILE, "w", encoding="utf-8", newline="") as fh:
             fh.write("symbol\n")
 
 
@@ -33,7 +33,7 @@ def load_rejected():
     """Return the set of symbols already recorded in verified_rejected.csv."""
     ensure_rejected_file()
     symbols = set()
-    with open(REJECTED_FILE, newline="") as fh:
+    with open(REJECTED_FILE, encoding="utf-8", newline="") as fh:
         for line in fh:
             sym = line.strip()
             if sym and sym != "symbol":
@@ -47,15 +47,19 @@ def record_rejected(symbol, rejected_syms):
         return
     rejected_syms.add(symbol)
     try:
-        with open(REJECTED_FILE, "a", newline="") as fh:
+        with open(REJECTED_FILE, "a", encoding="utf-8", newline="") as fh:
             fh.write(f"{symbol}\n")
     except OSError as exc:
         print(f"WARN: could not record {symbol} in {REJECTED_FILE}: {exc}",
               flush=True)
 
 
-def load_file(path, symbol):
-    """Upsert one staging CSV into MySQL. Returns (ok, rows, error)."""
+def load_file(path, symbol, conn=None):
+    """Upsert one staging CSV into MySQL. Returns (ok, rows, error).
+
+    `conn` is the run's shared connection (reused across files so the run
+    pays for one TLS handshake instead of three per file).
+    """
     try:
         df = pd.read_csv(path, dtype=str, keep_default_na=False)
     except Exception as exc:  # noqa: BLE001
@@ -81,12 +85,12 @@ def load_file(path, symbol):
         db.insert_rows("instruments",
                        ["symbol", "asset_type", "last_sync"],
                        [(symbol, "index" if symbol.startswith("^") else "equity",
-                         pd.Timestamp.now().to_pydatetime())])
-        written = db.insert_rows("price_history", COLUMNS, rows)
-        db.log_ingest("csv", symbol, os.path.basename(path), written, "ok")
+                         pd.Timestamp.now().to_pydatetime())], conn=conn)
+        written = db.insert_rows("price_history", COLUMNS, rows, conn=conn)
+        db.log_ingest("csv", symbol, os.path.basename(path), written, "ok", conn=conn)
         return True, written, None
     except Exception as exc:  # noqa: BLE001
-        db.log_ingest("csv", symbol, f"{type(exc).__name__}: {exc}", 0, "error")
+        db.log_ingest("csv", symbol, f"{type(exc).__name__}: {exc}", 0, "error", conn=conn)
         return False, 0, f"{type(exc).__name__}: {exc}"
 
 
@@ -114,20 +118,24 @@ def main():
     if rejected_syms:
         print(f"loaded {len(rejected_syms)} previously rejected symbols from "
               f"{REJECTED_FILE}", flush=True)
-    for i, name in enumerate(files, 1):
-        path = os.path.join(args.dir, name)
-        symbol = name[: -len(suffix)]
-        ok, n, err = load_file(path, symbol)
-        if ok:
-            done += 1
-            rows_total += n
-            print(f"OK: {symbol} -> {n} rows ({path})", flush=True)
-        else:
-            errors += 1
-            record_rejected(symbol, rejected_syms)
-            print(f"ERROR: {symbol} -> {err}", flush=True)
-        if i % 100 == 0:
-            print(f"[{i}/{len(files)}] ok={done} err={errors} rows={rows_total}", flush=True)
+    conn = db.loader_conn()
+    try:
+        for i, name in enumerate(files, 1):
+            path = os.path.join(args.dir, name)
+            symbol = name[: -len(suffix)]
+            ok, n, err = load_file(path, symbol, conn=conn)
+            if ok:
+                done += 1
+                rows_total += n
+                print(f"OK: {symbol} -> {n} rows ({path})", flush=True)
+            else:
+                errors += 1
+                record_rejected(symbol, rejected_syms)
+                print(f"ERROR: {symbol} -> {err}", flush=True)
+            if i % 100 == 0:
+                print(f"[{i}/{len(files)}] ok={done} err={errors} rows={rows_total}", flush=True)
+    finally:
+        conn.close()
     print(f"DONE ok={done} err={errors} rows={rows_total} of {len(files)}", flush=True)
     return 0
 
