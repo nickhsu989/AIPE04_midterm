@@ -1,12 +1,19 @@
 -- setup_finance_app.sql — one-time MySQL setup for the Financial Analytics Platform.
--- Run as a MySQL admin (root):  mysql -u root -p < setup_finance_app.sql
+-- Run as a MySQL admin (root):  mysql -u root < setup_finance_app.sql
 -- Idempotent: safe to re-run.
 CREATE DATABASE IF NOT EXISTS finance_app
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
+-- Two accounts on purpose: a server started with skip_name_resolve=ON never
+-- matches a 'localhost' grant for a TCP connection from 127.0.0.1, so the
+-- app user needs both (macOS Homebrew and most Linux packages are fine with
+-- just 'localhost', but this keeps the setup working everywhere).
 CREATE USER IF NOT EXISTS 'user'@'localhost'
   IDENTIFIED BY 'user';
+CREATE USER IF NOT EXISTS 'user'@'127.0.0.1'
+  IDENTIFIED BY 'user';
 GRANT ALL PRIVILEGES ON finance_app.* TO 'user'@'localhost';
+GRANT ALL PRIVILEGES ON finance_app.* TO 'user'@'127.0.0.1';
 FLUSH PRIVILEGES;
 
 USE finance_app;

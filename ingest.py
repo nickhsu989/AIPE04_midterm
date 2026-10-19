@@ -68,9 +68,9 @@ def record_failure(symbol, period, reason):
     """Append one failure row to the audit ledger; never crashes."""
     try:
         if not os.path.exists(FAILURES_FILE) or os.path.getsize(FAILURES_FILE) == 0:
-            with open(FAILURES_FILE, "w", newline="") as fh:
+            with open(FAILURES_FILE, "w", encoding="utf-8", newline="") as fh:
                 csv.writer(fh).writerow(["symbol", "period", "reason", "ts"])
-        with open(FAILURES_FILE, "a", newline="") as fh:
+        with open(FAILURES_FILE, "a", encoding="utf-8", newline="") as fh:
             csv.writer(fh).writerow(
                 [symbol, period, reason, datetime.now().isoformat(timespec="seconds")])
     except OSError as exc:
